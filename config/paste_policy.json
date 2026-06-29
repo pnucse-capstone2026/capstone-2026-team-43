@@ -1,0 +1,54 @@
+{
+  "_comment": "inspect_list: 붙여넣기 전 텍스트 검사. allowlist: 검사 없이 즉시 허용. default_action: 목록에 없는 프로세스의 기본 처리.",
+
+  "inspect_list": [
+    "chrome.exe",
+    "msedge.exe",
+    "firefox.exe",
+    "brave.exe",
+    "opera.exe",
+    "iexplore.exe",
+    "slack.exe",
+    "discord.exe",
+    "msteams.exe",
+    "teams.exe",
+    "outlook.exe",
+    "thunderbird.exe",
+    "telegram.exe",
+    "kakaotalk.exe",
+    "line.exe",
+    "zoom.exe",
+    "webex.exe",
+    "skype.exe",
+    "notion.exe",
+    "obsidian.exe",
+    "filezilla.exe",
+    "winscp.exe",
+    "putty.exe",
+    "cmd.exe",
+    "powershell.exe",
+    "windowsterminal.exe",
+    "wt.exe"
+  ],
+
+  "allowlist": [
+    "excel.exe",
+    "winword.exe",
+    "powerpnt.exe",
+    "onenote.exe",
+    "msaccess.exe",
+    "notepad.exe",
+    "notepad++.exe",
+    "code.exe",
+    "devenv.exe",
+    "pycharm64.exe",
+    "idea64.exe",
+    "rider64.exe",
+    "clion64.exe",
+    "datagrip64.exe",
+    "explorer.exe",
+    "mspaint.exe"
+  ],
+
+  "default_action": "allow"
+}

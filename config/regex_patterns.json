@@ -1,0 +1,114 @@
+{
+  "_comment": "severity: critical / high / medium. AI 서버 없을 때는 모든 hit를 차단. AI 도입 후에는 medium은 AI에게 최종 판단을 위임할 예정.",
+
+  "patterns": [
+    {
+      "id": "rrn",
+      "name": "주민등록번호",
+      "regex": "(?<!\\d)\\d{6}-[1-4]\\d{6}(?!\\d)",
+      "severity": "critical"
+    },
+    {
+      "id": "foreign_rrn",
+      "name": "외국인등록번호",
+      "regex": "(?<!\\d)\\d{6}-[5-8]\\d{6}(?!\\d)",
+      "severity": "critical"
+    },
+    {
+      "id": "passport_kr",
+      "name": "여권번호",
+      "regex": "(?<![A-Z0-9])[A-Z]{1,2}[0-9]{7,8}(?![A-Z0-9])",
+      "severity": "high"
+    },
+    {
+      "id": "driver_license_kr",
+      "name": "운전면허번호",
+      "regex": "\\d{2}-\\d{2}-\\d{6}-\\d{2}",
+      "severity": "high"
+    },
+    {
+      "id": "phone_mobile",
+      "name": "휴대폰번호",
+      "regex": "01[016789][\\s\\-]?\\d{3,4}[\\s\\-]?\\d{4}",
+      "severity": "medium"
+    },
+    {
+      "id": "phone_landline",
+      "name": "일반전화번호",
+      "regex": "0\\d{1,2}[\\s\\-]\\d{3,4}[\\s\\-]\\d{4}",
+      "severity": "medium"
+    },
+    {
+      "id": "email",
+      "name": "이메일",
+      "regex": "[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}",
+      "severity": "medium"
+    },
+    {
+      "id": "credit_card",
+      "name": "신용카드번호",
+      "regex": "(?<!\\d)\\d{4}[\\s\\-]?\\d{4}[\\s\\-]?\\d{4}[\\s\\-]?\\d{4}(?!\\d)",
+      "severity": "critical"
+    },
+    {
+      "id": "bank_account",
+      "name": "계좌번호",
+      "regex": "\\d{3,4}-\\d{2,6}-\\d{4,6}(?:-\\d{1,3})?",
+      "severity": "high"
+    },
+    {
+      "id": "business_registration",
+      "name": "사업자등록번호",
+      "regex": "(?<!\\d)\\d{3}-\\d{2}-\\d{5}(?!\\d)",
+      "severity": "high"
+    },
+    {
+      "id": "api_key_openai",
+      "name": "OpenAI API Key",
+      "regex": "sk-[a-zA-Z0-9]{32,}",
+      "severity": "critical"
+    },
+    {
+      "id": "api_key_anthropic",
+      "name": "Anthropic API Key",
+      "regex": "sk-ant-[a-zA-Z0-9\\-_]{32,}",
+      "severity": "critical"
+    },
+    {
+      "id": "api_key_aws_access",
+      "name": "AWS Access Key ID",
+      "regex": "AKIA[0-9A-Z]{16}",
+      "severity": "critical"
+    },
+    {
+      "id": "api_key_aws_secret",
+      "name": "AWS Secret Access Key",
+      "regex": "(?i)aws[_\\-\\s]?secret[_\\-\\s]?(?:access[_\\-\\s]?)?key[\\s:=]+[a-zA-Z0-9/+]{40}",
+      "severity": "critical"
+    },
+    {
+      "id": "github_token",
+      "name": "GitHub Personal Access Token",
+      "regex": "ghp_[a-zA-Z0-9]{36}",
+      "severity": "critical"
+    },
+    {
+      "id": "bearer_token",
+      "name": "Bearer Token",
+      "regex": "Bearer\\s+[a-zA-Z0-9._\\-]{20,}",
+      "severity": "high"
+    },
+    {
+      "id": "private_key_header",
+      "name": "Private Key",
+      "regex": "-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+      "severity": "critical"
+    },
+    {
+      "id": "connection_string",
+      "name": "DB 연결문자열",
+      "regex": "(?i)(?:mongodb|postgresql|mysql|mssql|redis)://[^\\s\"']{8,}",
+      "severity": "critical"
+    }
+  ]
+}

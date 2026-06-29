@@ -1,0 +1,17 @@
+# Sentry Host Agent — global settings
+
+server:
+  ai_base_url: "http://127.0.0.1:8000"
+  dashboard_url: "http://127.0.0.1:3000"
+  request_timeout_sec: 10
+
+thresholds:
+  # Risk score (0–100) above which content is blocked
+  block: 80
+  # Risk score above which content is flagged for review
+  warn: 50
+
+agent:
+  log_level: "INFO"
+  # Path to regex patterns (relative to project root)
+  regex_patterns: "config/regex_patterns.json"

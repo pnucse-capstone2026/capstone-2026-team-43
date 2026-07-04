@@ -1,7 +1,8 @@
 # Sentry Host Agent — global settings
 
 server:
-  ai_base_url: "http://127.0.0.1:8000"
+  # AI 서버 URL. 비워두면 mock 모드로 동작 (severity 기반 즉시 판단)
+  ai_base_url: ""
   dashboard_url: "http://127.0.0.1:3000"
   request_timeout_sec: 10
 
@@ -15,3 +16,14 @@ agent:
   log_level: "INFO"
   # Path to regex patterns (relative to project root)
   regex_patterns: "config/regex_patterns.json"
+
+logging:
+  # 로컬 JSONL 이벤트 저장 경로 (프로젝트 루트 기준)
+  log_dir: "logs"
+  # 파일 크기(바이트) 초과 시 날짜별로 로테이션
+  max_bytes: 10485760   # 10 MB
+  # 이벤트에 저장할 텍스트 미리보기 최대 길이 (원문 전체 저장 방지)
+  text_preview_len: 120
+
+  # 웹 서버 전송 설정 (서버 준비 후 활성화)
+  send_immediately: false   # true 로 바꾸면 탐지 즉시 POST

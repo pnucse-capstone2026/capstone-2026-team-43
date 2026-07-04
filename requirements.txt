@@ -1,4 +1,17 @@
+# ── 기본 ──────────────────────────────────────────────────────────────────────
 pywin32>=306
 requests>=2.31.0
 PyYAML>=6.0.1
 pytest>=8.0.0
+
+# ── network_hook: 메일/SMTP ───────────────────────────────────────────────────
+aiosmtpd>=1.4.6        # 로컬 SMTP 프록시 서버
+aiosmtplib>=3.0.0      # SMTP 릴레이 클라이언트 (async)
+
+# ── network_hook: 첨부파일 텍스트 추출 ───────────────────────────────────────
+python-docx>=1.1.0     # .docx 파싱
+PyMuPDF>=1.24.0        # .pdf 파싱 (import fitz)
+openpyxl>=3.1.0        # .xlsx 파싱
+
+# ── network_hook: HTTP 패킷 캡처 (선택 — WinDivert 드라이버 별도 설치 필요) ──
+# pydivert>=2.1.0

@@ -1,0 +1,77 @@
+; sentry_filter.inf
+; Sentry DLP 미니필터 드라이버 설치 파일
+;
+; 설치 명령 (관리자 PowerShell):
+;   sc create SentryDLP type= filesys start= demand binPath= "<경로>\sentry_filter.sys"
+;   fltMC load SentryDLP
+;   또는 install.ps1 스크립트 사용
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = "ActivityMonitor"
+ClassGuid   = {b86dff51-a31e-4bac-b3cf-e8cfe75c9fc2}
+Provider    = %ProviderName%
+DriverVer   = 07/04/2026,1.0.0.0
+CatalogFile = sentry_filter.cat
+
+[DestinationDirs]
+DefaultDestDir = 12            ; %windir%\System32\drivers
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+sentry_filter.sys = 1,,
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; DefaultInstall
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+[DefaultInstall.NTAMD64]
+OptionDesc  = %ServiceDescription%
+CopyFiles   = SentryDLP.DriverFiles
+
+[DefaultInstall.NTAMD64.Services]
+AddService  = %ServiceName%,,SentryDLP.Service
+
+[DefaultUninstall.NTAMD64]
+DelFiles    = SentryDLP.DriverFiles
+
+[DefaultUninstall.NTAMD64.Services]
+DelService  = %ServiceName%,0x200  ; SPSVCINST_STOPSERVICE
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 서비스 설치 섹션
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+[SentryDLP.Service]
+DisplayName    = %ServiceName%
+Description    = %ServiceDescription%
+ServiceBinary  = %12%\sentry_filter.sys   ; \System32\drivers\
+Dependencies   = FltMgr
+ServiceType    = 2                         ; SERVICE_FILE_SYSTEM_DRIVER
+StartType      = 3                         ; SERVICE_DEMAND_START
+ErrorControl   = 1                         ; SERVICE_ERROR_NORMAL
+LoadOrderGroup = "FSFilter Activity Monitor"
+AddReg         = SentryDLP.AddRegistry
+
+[SentryDLP.AddRegistry]
+HKR,,"SupportedFeatures",0x00010001,0x3
+HKR,"Instances","DefaultInstance",0x00000000,%DefaultInstance%
+HKR,"Instances\"%DefaultInstance%","Altitude",0x00000000,%DefaultAltitude%
+HKR,"Instances\"%DefaultInstance%","Flags",0x00010001,0x0
+
+[SentryDLP.DriverFiles]
+sentry_filter.sys
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; 문자열 섹션
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+[Strings]
+ProviderName        = "Sentry DLP"
+ServiceName         = "SentryDLP"
+ServiceDescription  = "Sentry Data Loss Prevention Filter Driver"
+DiskName            = "Sentry DLP Installation Disk"
+DefaultInstance     = "SentryDLP Instance"
+DefaultAltitude     = "265000"

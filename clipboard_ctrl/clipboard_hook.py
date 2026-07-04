@@ -38,16 +38,48 @@ VK_CONTROL = 0x11
 # HWND_MESSAGE: message-only window parent (-3 as a signed pointer-sized int)
 HWND_MESSAGE: int = ctypes.cast(ctypes.c_void_p(-3), ctypes.c_void_p).value  # type: ignore[assignment]
 
-_user32 = ctypes.windll.user32
-_kernel32 = ctypes.windll.kernel32
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+LRESULT = ctypes.c_ssize_t
 
 # ── Keyboard hook struct ──────────────────────────────────────────────────────
-LowLevelKeyboardProc = ctypes.CFUNCTYPE(
-    ctypes.c_int,
+LowLevelKeyboardProc = ctypes.WINFUNCTYPE(
+    LRESULT,
     ctypes.c_int,
     ctypes.wintypes.WPARAM,
     ctypes.wintypes.LPARAM,
 )
+
+_user32.SetWindowsHookExW.argtypes = [
+    ctypes.c_int,
+    LowLevelKeyboardProc,
+    ctypes.c_void_p,
+    ctypes.wintypes.DWORD,
+]
+_user32.SetWindowsHookExW.restype = ctypes.c_void_p
+_user32.CallNextHookEx.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_int,
+    ctypes.wintypes.WPARAM,
+    ctypes.wintypes.LPARAM,
+]
+_user32.CallNextHookEx.restype = LRESULT
+_user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+_user32.UnhookWindowsHookEx.restype = ctypes.wintypes.BOOL
+_user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+_user32.GetAsyncKeyState.restype = ctypes.wintypes.SHORT
+_user32.GetForegroundWindow.argtypes = []
+_user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+_user32.PostThreadMessageW.argtypes = [
+    ctypes.wintypes.DWORD,
+    ctypes.wintypes.UINT,
+    ctypes.wintypes.WPARAM,
+    ctypes.wintypes.LPARAM,
+]
+_user32.PostThreadMessageW.restype = ctypes.wintypes.BOOL
+_user32.AddClipboardFormatListener.argtypes = [ctypes.wintypes.HWND]
+_user32.AddClipboardFormatListener.restype = ctypes.wintypes.BOOL
+_user32.RemoveClipboardFormatListener.argtypes = [ctypes.wintypes.HWND]
+_user32.RemoveClipboardFormatListener.restype = ctypes.wintypes.BOOL
 
 
 class _KBDLLHOOKSTRUCT(ctypes.Structure):
@@ -210,11 +242,11 @@ class ClipboardHook:
         self._hook_id = _user32.SetWindowsHookExW(
             WH_KEYBOARD_LL,
             self._hook_proc_ref,
-            _kernel32.GetModuleHandleW(None),
+            None,
             0,
         )
         if not self._hook_id:
-            err = ctypes.GetLastError()
+            err = ctypes.get_last_error()
             logger.error("Failed to install WH_KEYBOARD_LL (error=%d)", err)
             return
 

@@ -1,0 +1,46 @@
+{
+  "_comment": "네트워크·파일 반출 채널별 정책. 수정 후 에이전트 재시작 필요.",
+
+  "internal_domains": [
+    "company.com",
+    "corp.local",
+    "internal.corp"
+  ],
+
+  "outlook": {
+    "enabled": true,
+    "_comment": "Outlook COM ItemSend 훅. Outlook이 실행 중이어야 동작."
+  },
+
+  "smtp": {
+    "enabled": false,
+    "_comment": "SMTP 프록시. 메일 클라이언트의 발신 서버를 127.0.0.1:proxy_port 로 변경 필요.",
+    "proxy_port": 2525,
+    "relay": {
+      "host": "smtp.company.com",
+      "port": 587,
+      "use_tls": true,
+      "username": "",
+      "password": ""
+    }
+  },
+
+  "http": {
+    "enabled": false,
+    "_comment": "WinDivert 드라이버 + 관리자 권한 필요. HTTPS(443)는 내용 검사 불가.",
+    "inspect_ports": [80, 8080]
+  },
+
+  "file_guard": {
+    "_comment": "USB·네트워크공유 파일 반출 탐지. sentry_filter.sys 로드 + 관리자 권한 필요.",
+    "enabled": false,
+    "block_usb": true,
+    "block_network_share": true,
+    "smb_allowlist": [
+      "\\\\fileserver.corp.local\\teams\\",
+      "\\\\nas.internal\\projects\\"
+    ],
+    "fail_open": true,
+    "_fail_open_comment": "true: 드라이버/에이전트 오류 시 허용(Fail-Open). false: 오류 시 차단(Fail-Safe)."
+  }
+}

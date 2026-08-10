@@ -42,5 +42,57 @@
     ],
     "fail_open": true,
     "_fail_open_comment": "true: 드라이버/에이전트 오류 시 허용(Fail-Open). false: 오류 시 차단(Fail-Safe)."
+  },
+
+  "web_proxy": {
+    "_comment": "HTTPS MITM 프록시. install/setup_proxy.ps1 으로 CA 인증서 + 시스템 프록시 선행 설정 필요. 메일 호스트만 TLS 검사.",
+    "enabled": true,
+    "proxy_port": 8082,
+
+    "_inspect_domains_comment": "국내에서 많이 쓰는 웹메일(+Office/Gmail). 이 호스트만 TLS 가로채기·전송(POST) 검사/로그.",
+    "inspect_domains": [
+      "mail.google.com",
+      "gmail.googleapis.com",
+      "mail.naver.com",
+      "mail.navercorp.com",
+      "mail.daum.net",
+      "hanmail.net",
+      "mail.kakao.com",
+      "mail.nate.com",
+      "outlook.live.com",
+      "outlook.office.com",
+      "outlook.office365.com",
+      "attachment.outlook.live.net",
+      "mail.worksmobile.com",
+      "mail.yahoo.com",
+      "mail.yahoo.co.kr"
+    ],
+
+    "_passthrough_hosts_comment": "검사 없이 무조건 통과시킬 호스트 (현재 unused — allow_hosts 로 제한).",
+    "passthrough_hosts": [],
+
+    "_auto_cert_comment": "true: 에이전트 시작 시 CA 설치 여부 자동 확인. false: 수동 관리.",
+    "auto_check_cert": true,
+
+    "_log_traffic_comment": "true: 메일 전송(POST/PUT/PATCH) 패킷만 콘솔 로그. 그 외 PASS 로그 없음.",
+    "log_traffic": true,
+
+    "_skip_path_patterns_comment": "이 패턴이 URL에 포함되면 DLP 검사 건너뜀 (sync·에러·자동완성 등 비전송 요청 제외).",
+    "skip_path_patterns": [
+      "/sync/u/0/i/fd",
+      "/sync/u/0/i/bv",
+      "/sync/u/0/i/bm",
+      "/sync/u/0/i/bc",
+      "jserror",
+      "view=rcptc",
+      "/log?",
+      "logstreamz",
+      "chrome-sync",
+      "/update2/",
+      "domainreliability"
+    ],
+
+    "_min_body_bytes_comment": "이 바이트 미만 본문은 검사 제외 (수신자 자동완성 등 초소형 요청 제외). 0=제한없음.",
+    "min_body_bytes": 80
   }
 }

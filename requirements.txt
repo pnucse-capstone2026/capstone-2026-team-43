@@ -13,5 +13,8 @@ python-docx>=1.1.0     # .docx 파싱
 PyMuPDF>=1.24.0        # .pdf 파싱 (import fitz)
 openpyxl>=3.1.0        # .xlsx 파싱
 
+# ── network_hook: HTTPS MITM 프록시 (웹 메일 DLP) ────────────────────────────
+mitmproxy>=10.3.0      # HTTPS 인터셉트 + mitmproxy CA 자동 생성
+
 # ── network_hook: HTTP 패킷 캡처 (선택 — WinDivert 드라이버 별도 설치 필요) ──
 # pydivert>=2.1.0

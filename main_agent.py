@@ -36,6 +36,7 @@ from core_comm.event_logger import EventLogger
 from core_comm.local_store import LocalEventStore
 from core_comm.payload_builder import PayloadBuilder
 from network_hook.file_inspector import FileInspector
+from network_hook.proxy_cert import ProxyCert
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -73,9 +74,10 @@ def build_api_client(settings: dict[str, Any]) -> ApiClient:
 
 def build_payload_builder(settings: dict[str, Any]) -> PayloadBuilder:
     agent_cfg = settings.get("agent", {})
+    # max_text_chars: 0 = 원문 전체 무제한 전송. 대용량 파일 보호 시 상한 설정.
     return PayloadBuilder(
-        context_chars=agent_cfg.get("snippet_context_chars", 150),
-        max_per_pattern=agent_cfg.get("snippet_max_per_pattern", 3),
+        max_text_chars=agent_cfg.get("ai_max_text_chars", 0),
+        max_per_pattern=agent_cfg.get("ai_max_matches_per_pattern", 10),
     )
 
 
@@ -303,6 +305,38 @@ def build_file_guard(
     )
 
 
+def build_web_proxy(
+    rule_filter: RuleFilter,
+    event_logger: EventLogger,
+    api_client: ApiClient,
+    payload_builder: PayloadBuilder,
+    fi: FileInspector,
+    policy: dict[str, Any],
+) -> Any:
+    """HTTPS MITM 웹 메일 DLP 채널 빌더."""
+    from network_hook.web_proxy import WebProxy
+    from clipboard_ctrl.notifier import notify_blocked as _notify
+
+    wp_cfg = policy.get("web_proxy", {})
+
+    def on_blocked(url: str, hits: list, process_name: str) -> None:
+        _notify(process_name, hits)
+
+    return WebProxy(
+        port=wp_cfg.get("proxy_port", 8082),
+        inspect_domains=wp_cfg.get("inspect_domains", []),
+        rule_filter=rule_filter,
+        payload_builder=payload_builder,
+        api_client=api_client,
+        event_logger=event_logger,
+        file_inspector=fi,
+        on_blocked=on_blocked,
+        log_traffic=bool(wp_cfg.get("log_traffic", True)),
+        skip_path_patterns=wp_cfg.get("skip_path_patterns", []),
+        min_body_bytes=int(wp_cfg.get("min_body_bytes", 0)),
+    )
+
+
 # ── 채널 분류 ──────────────────────────────────────────────────────────────────
 #
 # SESSION_0_CHANNELS : Windows 서비스(Session 0)에서 실행 가능
@@ -408,6 +442,35 @@ def _start_channels(
                 )
         else:
             logger.info("[채널] file_guard OFF  (channel_policy.json)")
+
+    # ── 유저 세션 + 프록시 채널 (시스템 프록시 설정은 현재 사용자 기준) ────────
+
+    if run_user:
+        # 6. HTTPS MITM 웹 메일 프록시
+        wp_cfg = channel_policy.get("web_proxy", {})
+        if wp_cfg.get("enabled", False):
+            try:
+                # CA 인증서 자동 확인
+                if wp_cfg.get("auto_check_cert", True):
+                    pc = ProxyCert()
+                    if not pc.is_installed():
+                        logger.warning(
+                            "[채널] web_proxy — CA 인증서가 설치되지 않았습니다.\n"
+                            "  install\\setup_proxy.ps1 을 관리자 권한으로 실행하세요."
+                        )
+                wp = build_web_proxy(
+                    rule_filter, event_logger, api_client, payload_builder, fi, channel_policy
+                )
+                wp.start()
+                active.append(wp)
+            except Exception as exc:
+                logger.warning(
+                    "[채널] web_proxy  SKIP (%s)\n"
+                    "  → pip install mitmproxy  후 재시작하세요",
+                    exc,
+                )
+        else:
+            logger.info("[채널] web_proxy  OFF  (channel_policy.json)")
 
 
 # ── 메인 ───────────────────────────────────────────────────────────────────────

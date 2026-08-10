@@ -1,52 +1,8 @@
 """payload_builder + api_client mock 모드 단위 테스트."""
 
-import pytest
-
 from core_comm.api_client import ApiClient
-from core_comm.payload_builder import (
-    AnalysisPayload,
-    AnalysisResult,
-    PayloadBuilder,
-    ResponseParser,
-    _mask_value,
-)
+from core_comm.payload_builder import PayloadBuilder, ResponseParser
 
-
-# ── 마스킹 ────────────────────────────────────────────────────────────────────
-
-class TestMaskValue:
-    def test_rrn_hides_last_six_digits(self):
-        """주민번호 뒷 6자리를 마스킹한다."""
-        masked = _mask_value("900101-1234567", "rrn")
-        assert masked.startswith("900101-1")
-        assert "█" in masked
-        assert "234567" not in masked
-
-    def test_credit_card_hides_middle(self):
-        """카드번호 중간 8자리를 마스킹한다."""
-        masked = _mask_value("4532-1234-5678-9012", "credit_card")
-        assert masked.startswith("4532")
-        assert masked.endswith("9012")
-        assert "1234" not in masked or "5678" not in masked
-
-    def test_api_key_keeps_prefix(self):
-        masked = _mask_value("sk-abcdefghijklmnopqrstuvwxyz1234567", "api_key_openai")
-        assert masked.startswith("sk-abc")
-        assert "█" in masked
-
-    def test_email_hides_local_part(self):
-        masked = _mask_value("user@example.com", "email")
-        # 앞 2자 보존 후 나머지 마스킹
-        assert masked.startswith("us")
-        assert "█" in masked
-
-    def test_short_value_still_masks(self):
-        masked = _mask_value("12", "rrn")
-        # 너무 짧아도 crash 없이 처리
-        assert isinstance(masked, str)
-
-
-# ── 스니펫 추출 ───────────────────────────────────────────────────────────────
 
 HITS_RRN = [{"id": "rrn", "name": "주민등록번호", "regex": r"(?<!\d)\d{6}-[1-4]\d{6}(?!\d)", "severity": "critical"}]
 HITS_PHONE = [{"id": "phone_mobile", "name": "휴대폰번호", "regex": r"01[016789][\s\-]?\d{3,4}[\s\-]?\d{4}", "severity": "medium"}]
@@ -55,7 +11,7 @@ HITS_MIXED = HITS_RRN + HITS_PHONE
 
 class TestPayloadBuilder:
     def setup_method(self):
-        self.builder = PayloadBuilder(context_chars=50, max_per_pattern=2)
+        self.builder = PayloadBuilder()
 
     def _build(self, text, hits, channel="clipboard", process="slack.exe"):
         return self.builder.build(text, hits, channel, process)
@@ -67,40 +23,46 @@ class TestPayloadBuilder:
         assert payload.channel == "clipboard"
         assert payload.process == "slack.exe"
 
-    def test_snippet_extracted(self):
-        payload = self._build("텍스트 900101-1234567 끝", HITS_RRN)
-        assert len(payload.snippets) == 1
-        s = payload.snippets[0]
-        assert s.pattern_id == "rrn"
-        assert s.severity == "critical"
-        assert "█" in s.match_masked
-        assert "█" in s.context
-
-    def test_no_snippet_when_no_hit(self):
-        payload = self._build("민감하지 않은 텍스트입니다", HITS_RRN)
-        assert payload.snippets == []
-
-    def test_max_per_pattern_respected(self):
-        # 같은 패턴 3번 → max_per_pattern=2 이므로 2개만
-        text = "900101-1234567 홍 800202-2345678 이 750303-3456789 박"
+    def test_full_text_unmasked(self):
+        """원문 전체가 마스킹 없이 담겨야 한다."""
+        text = "텍스트 900101-1234567 끝"
         payload = self._build(text, HITS_RRN)
-        assert len(payload.snippets) <= 2
+        assert payload.text == text
+        assert "█" not in payload.text
+        assert "900101-1234567" in payload.text
+
+    def test_matched_patterns_include_raw_match(self):
+        payload = self._build("텍스트 900101-1234567 끝", HITS_RRN)
+        assert len(payload.matched_patterns) == 1
+        m = payload.matched_patterns[0]
+        assert m.pattern_id == "rrn"
+        assert m.severity == "critical"
+        assert m.match == "900101-1234567"
+        assert "█" not in m.match
+        assert payload.text[m.start:m.end] == m.match
+
+    def test_no_match_when_regex_misses(self):
+        payload = self._build("민감하지 않은 텍스트입니다", HITS_RRN)
+        assert payload.matched_patterns == []
+        assert payload.text == "민감하지 않은 텍스트입니다"
 
     def test_severity_ordering(self):
-        # critical(rrn)이 medium(phone)보다 앞에 나와야 한다
         text = "010-1234-5678 그리고 900101-1234567"
         payload = self._build(text, HITS_MIXED)
-        assert payload.snippets[0].pattern_id == "rrn"
+        assert payload.matched_patterns[0].pattern_id == "rrn"
 
     def test_metadata_contains_expected_keys(self):
         payload = self._build("900101-1234567", HITS_RRN)
         meta = payload.metadata
         assert "hostname" in meta
         assert "total_text_len" in meta
+        assert "sent_text_len" in meta
+        assert "truncated" in meta
         assert "total_hits" in meta
         assert "max_severity" in meta
         assert "pattern_ids" in meta
         assert "text_hash" in meta
+        assert meta["truncated"] is False
 
     def test_metadata_max_severity_critical(self):
         payload = self._build("900101-1234567", HITS_RRN)
@@ -110,24 +72,27 @@ class TestPayloadBuilder:
         payload = self._build("010-1234-5678", HITS_PHONE)
         assert payload.metadata["max_severity"] == "medium"
 
-    def test_to_dict_serializable(self):
+    def test_to_dict_has_text_not_snippets(self):
         import json
-        payload = self._build("900101-1234567", HITS_RRN)
+        text = "원문 900101-1234567"
+        payload = self._build(text, HITS_RRN)
         d = payload.to_dict()
-        dumped = json.dumps(d)  # JSON 직렬화 검증
+        dumped = json.dumps(d, ensure_ascii=False)
         assert "request_id" in dumped
-        assert "snippets" in dumped
+        assert "text" in d
+        assert d["text"] == text
+        assert "snippets" not in d
+        assert "matched_patterns" in d
+        assert d["matched_patterns"][0]["match"] == "900101-1234567"
 
-    def test_context_chars_limits_snippet_length(self):
-        long_text = "A" * 1000 + " 900101-1234567 " + "B" * 1000
-        builder_narrow = PayloadBuilder(context_chars=10, max_per_pattern=1)
-        payload = builder_narrow.build(long_text, HITS_RRN, "clipboard", "test.exe")
-        ctx = payload.snippets[0].context
-        # context_chars=10 → 매칭 전후 10자씩 + 마스킹 길이
-        assert len(ctx) < 100  # 1000자보다 훨씬 짧아야 함
+    def test_optional_truncate(self):
+        long_text = "A" * 100 + " 900101-1234567"
+        builder = PayloadBuilder(max_text_chars=50)
+        payload = builder.build(long_text, HITS_RRN, "clipboard", "test.exe")
+        assert len(payload.text) == 50
+        assert payload.metadata["truncated"] is True
+        assert payload.metadata["total_text_len"] == len(long_text)
 
-
-# ── ResponseParser ─────────────────────────────────────────────────────────────
 
 class TestResponseParser:
     def test_parse_block(self):
@@ -153,11 +118,9 @@ class TestResponseParser:
         assert result.action == "block"
 
 
-# ── ApiClient mock 모드 ────────────────────────────────────────────────────────
-
 class TestApiClientMock:
     def setup_method(self):
-        self.client  = ApiClient(base_url="")   # mock 모드
+        self.client  = ApiClient(base_url="")
         self.builder = PayloadBuilder()
         assert self.client.is_mock
 
@@ -188,7 +151,7 @@ class TestApiClientMock:
     def test_result_has_reason(self):
         payload = self._payload("900101-1234567", HITS_RRN)
         result  = self.client.analyze(payload)
-        assert result.reason  # 빈 문자열이 아님
+        assert result.reason
 
     def test_result_request_id_matches_payload(self):
         payload = self._payload("900101-1234567", HITS_RRN)

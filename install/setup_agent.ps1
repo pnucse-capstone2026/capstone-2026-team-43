@@ -78,6 +78,38 @@ if ($pywin32Check -ne "ok") {
 }
 Write-OK "pywin32 확인"
 
+# ── 내장 드라이브 기준 파일 생성 ──────────────────────────────────────────────
+# USB가 꽂히지 않은 상태에서 현재 FIXED 드라이브를 내장으로 저장.
+# 이 파일을 기준으로 이후 추가되는 드라이브를 이동식으로 판단한다.
+
+Write-Step "내장 드라이브 기준 파일 생성 (config/internal_drives.json)"
+Write-Warn "  이동식 저장장치(USB, 외장 HDD 등)가 모두 제거된 상태인지 확인하세요."
+Write-Warn "  현재 연결된 모든 드라이브를 내장으로 기록합니다."
+$internalDrivesScript = @"
+import win32api, win32file, win32con, json, pathlib
+def iter_drives():
+    bitmask = win32api.GetLogicalDrives()
+    for i in range(26):
+        if bitmask & (1 << i):
+            letter = chr(ord('A') + i) + ':'
+            try:
+                dtype = win32file.GetDriveType(letter + chr(92))
+                yield letter, dtype
+            except Exception:
+                pass
+# FIXED + REMOVABLE 모두 내장으로 기록 (설치 시점에 꽂혀 있는 건 전부 내장)
+internal = [l for l, t in iter_drives() if t in (win32con.DRIVE_FIXED, win32con.DRIVE_REMOVABLE)]
+out = pathlib.Path(r'$AgentDir\config\internal_drives.json')
+out.write_text(json.dumps({'internal_drives': internal, '_comment': 'setup 시 자동 생성. 이동식 저장장치 제거 후 설치 권장. 이 목록 외 드라이브는 외장으로 간주.'}, ensure_ascii=False, indent=2), encoding='utf-8')
+print('OK internal_drives=' + str(internal))
+"@
+$result = & $PythonExe -c $internalDrivesScript 2>&1
+if ($result -match "^OK") {
+    Write-OK "내장 드라이브 기준 저장: $result"
+} else {
+    Write-Warn "내장 드라이브 기준 생성 실패 (에이전트 첫 실행 시 자동 생성됩니다): $result"
+}
+
 # ════════════════════════════════════════════════════════════════════════════════
 # 1. Windows 서비스 등록 (SentryDLPService)
 # ════════════════════════════════════════════════════════════════════════════════

@@ -32,16 +32,10 @@
   },
 
   "file_guard": {
-    "_comment": "USB·네트워크공유 파일 반출 탐지. sentry_filter.sys 로드 + 관리자 권한 필요.",
-    "enabled": false,
-    "block_usb": true,
-    "block_network_share": true,
-    "smb_allowlist": [
-      "\\\\fileserver.corp.local\\teams\\",
-      "\\\\nas.internal\\projects\\"
-    ],
-    "fail_open": true,
-    "_fail_open_comment": "true: 드라이버/에이전트 오류 시 허용(Fail-Open). false: 오류 시 차단(Fail-Safe)."
+    "_comment": "USB 이동식 드라이브 파일 반출 탐지. 유저모드(커널 드라이버 불필요). 관리자 권한 불필요.",
+    "enabled": true,
+    "_max_file_size_mb_comment": "이 크기 초과 파일은 검사 생략 (기본 50 MB)",
+    "max_file_size_mb": 50
   },
 
   "web_proxy": {

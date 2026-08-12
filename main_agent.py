@@ -287,21 +287,26 @@ def build_file_guard(
     api_client: ApiClient,
     payload_builder: PayloadBuilder,
     fi: FileInspector,
+    policy: dict[str, Any],
 ) -> Any:
-    from usb_minifilter.file_guard import FileGuard
+    from usb_minifilter.usb_guard_usermode import UsbGuardUserMode
     from clipboard_ctrl.notifier import notify_blocked as _notify
 
-    def on_blocked(file_path: str, hits: list, process_name: str) -> None:
-        _notify(process_name, hits)
-        logger.warning("[file_guard] 차단 — %s  process=%s", file_path, process_name)
+    cfg = policy.get("file_guard", {})
+    max_mb = cfg.get("max_file_size_mb", 50)
 
-    return FileGuard(
+    def on_blocked(file_path: str, hits: list) -> None:
+        filename = file_path.split("\\")[-1]
+        _notify(f"USB 복사 차단: {filename}", hits)
+
+    return UsbGuardUserMode(
         rule_filter=rule_filter,
         payload_builder=payload_builder,
         api_client=api_client,
         event_logger=event_logger,
         file_inspector=fi,
         on_blocked=on_blocked,
+        max_file_size=max_mb * 1024 * 1024,
     )
 
 
@@ -397,6 +402,7 @@ def _start_channels(
 
     if run_system:
         # 3. SMTP 프록시
+
         if channel_policy.get("smtp", {}).get("enabled", False):
             try:
                 smtp = build_smtp_proxy(
@@ -427,25 +433,23 @@ def _start_channels(
         else:
             logger.info("[채널] http       OFF  (channel_policy.json)")
 
-        # 5. FileGuard (USB + 네트워크 공유) — 커널 드라이버 필요
-        if channel_policy.get("file_guard", {}).get("enabled", False):
-            try:
-                fg = build_file_guard(rule_filter, event_logger, api_client, payload_builder, fi)
-                fg.start()
-                active.append(fg)
-                logger.info("[채널] file_guard ON  (USB + 네트워크 공유)")
-            except Exception as exc:
-                logger.warning(
-                    "[채널] file_guard SKIP (%s)\n"
-                    "  → usb_minifilter/install/install.ps1 로 드라이버를 먼저 설치하세요",
-                    exc,
-                )
-        else:
-            logger.info("[채널] file_guard OFF  (channel_policy.json)")
-
     # ── 유저 세션 + 프록시 채널 (시스템 프록시 설정은 현재 사용자 기준) ────────
 
     if run_user:
+        # 5. FileGuard (USB 이동식 드라이브) — 유저모드, 알림 팝업 필요
+        if channel_policy.get("file_guard", {}).get("enabled", False):
+            try:
+                fg = build_file_guard(
+                    rule_filter, event_logger, api_client, payload_builder, fi, channel_policy
+                )
+                fg.start()
+                active.append(fg)
+                logger.info("[채널] file_guard ON  (USB 이동식 드라이브 감시)")
+            except Exception as exc:
+                logger.warning("[채널] file_guard SKIP (%s)", exc)
+        else:
+            logger.info("[채널] file_guard OFF  (channel_policy.json)")
+
         # 6. HTTPS MITM 웹 메일 프록시
         wp_cfg = channel_policy.get("web_proxy", {})
         if wp_cfg.get("enabled", False):

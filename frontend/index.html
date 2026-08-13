@@ -1,0 +1,1687 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>민감정보 파일 반출 탐지를 위한 AI 기반 Host DLP 시스템</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg: #f5f8fc;
+            --surface: #ffffff;
+            --surface-soft: #f8fbff;
+            --line: #dce7f5;
+            --line-strong: #c9d8eb;
+            --text: #172033;
+            --muted: #667085;
+            --blue: #2563eb;
+            --blue-soft: #eaf1ff;
+            --cyan: #0ea5e9;
+            --ok: #16a34a;
+            --ok-soft: #dcfce7;
+            --warn: #d97706;
+            --warn-soft: #fef3c7;
+            --danger: #dc2626;
+            --danger-soft: #fee2e2;
+            --nav: #edf4ff;
+            --shadow: 0 18px 48px rgba(31, 74, 125, 0.12);
+            --shadow-soft: 0 10px 28px rgba(31, 74, 125, 0.08);
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            font-family: "Pretendard", "Noto Sans KR", "Segoe UI", sans-serif;
+            color: var(--text);
+            background:
+                radial-gradient(circle at 12% 8%, rgba(37, 99, 235, 0.14), transparent 28%),
+                radial-gradient(circle at 88% 18%, rgba(14, 165, 233, 0.12), transparent 26%),
+                linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%);
+        }
+
+        h1, h2, h3, h4, p {
+            margin: 0;
+        }
+
+        a {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        .app-shell {
+            display: grid;
+            grid-template-columns: 260px minmax(0, 1fr);
+            min-height: 100vh;
+        }
+
+        .sidebar {
+            position: sticky;
+            top: 0;
+            height: 100vh;
+            padding: 22px 16px;
+            background: rgba(255, 255, 255, 0.82);
+            border-right: 1px solid var(--line);
+            backdrop-filter: blur(18px);
+            display: flex;
+            flex-direction: column;
+            gap: 22px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 8px 16px;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .brand-mark {
+            width: 42px;
+            height: 42px;
+            border-radius: 14px;
+            display: grid;
+            place-items: center;
+            color: #ffffff;
+            font-weight: 900;
+            background: linear-gradient(135deg, var(--blue), var(--cyan));
+            box-shadow: 0 12px 24px rgba(37, 99, 235, 0.22);
+        }
+
+        .brand strong {
+            display: block;
+            font-size: 15px;
+            letter-spacing: -0.02em;
+        }
+
+        .brand span {
+            display: block;
+            margin-top: 3px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .nav-group {
+            display: grid;
+            gap: 8px;
+        }
+
+        .nav-label {
+            padding: 0 10px;
+            color: #8a98ad;
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .nav-link {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 13px;
+            border-radius: 14px;
+            color: #42526b;
+            font-size: 14px;
+            font-weight: 800;
+            transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+        }
+
+        .nav-link:hover,
+        .nav-link.active {
+            color: var(--blue);
+            background: var(--blue-soft);
+            transform: translateX(2px);
+        }
+
+        .nav-icon {
+            width: 24px;
+            height: 24px;
+            border-radius: 9px;
+            display: grid;
+            place-items: center;
+            background: rgba(37, 99, 235, 0.08);
+        }
+
+        .sidebar-card {
+            margin-top: auto;
+            padding: 16px;
+            border-radius: 20px;
+            background: linear-gradient(160deg, #eff6ff, #ffffff);
+            border: 1px solid var(--line);
+            box-shadow: var(--shadow-soft);
+        }
+
+        .sidebar-card strong {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        .sidebar-card p {
+            color: var(--muted);
+            font-size: 12px;
+            line-height: 1.55;
+        }
+
+        .main {
+            min-width: 0;
+            padding: 24px;
+        }
+
+        .topbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 18px;
+            margin-bottom: 22px;
+        }
+
+        .page-eyebrow {
+            color: var(--blue);
+            font-size: 12px;
+            font-weight: 900;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .topbar h1 {
+            margin-top: 6px;
+            font-size: clamp(1.5rem, 2.5vw, 2.35rem);
+            letter-spacing: -0.04em;
+        }
+
+        .topbar-meta {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 13px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.78);
+            border: 1px solid var(--line);
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 800;
+            box-shadow: var(--shadow-soft);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            background: var(--ok);
+            box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.12);
+        }
+
+        .page {
+            display: none;
+        }
+
+        .page.active {
+            display: block;
+        }
+
+        .hero {
+            display: grid;
+            grid-template-columns: minmax(0, 1.45fr) minmax(300px, 0.75fr);
+            gap: 18px;
+            margin-bottom: 18px;
+        }
+
+        .panel {
+            background: rgba(255, 255, 255, 0.88);
+            border: 1px solid var(--line);
+            border-radius: 24px;
+            box-shadow: var(--shadow);
+        }
+
+        .card {
+            padding: 22px;
+        }
+
+        .hero-main {
+            position: relative;
+            overflow: hidden;
+            min-height: 260px;
+            padding: 28px;
+            background:
+                linear-gradient(135deg, rgba(37, 99, 235, 0.12), rgba(14, 165, 233, 0.06)),
+                rgba(255, 255, 255, 0.9);
+        }
+
+        .hero-main::after {
+            content: "";
+            position: absolute;
+            right: -80px;
+            top: -90px;
+            width: 260px;
+            height: 260px;
+            border-radius: 50%;
+            background: rgba(37, 99, 235, 0.1);
+        }
+
+        .hero-main > * {
+            position: relative;
+            z-index: 1;
+        }
+
+        .hero-main h2 {
+            max-width: 800px;
+            font-size: clamp(2rem, 4vw, 3.45rem);
+            line-height: 1.05;
+            letter-spacing: -0.055em;
+        }
+
+        .hero-copy {
+            margin-top: 16px;
+            max-width: 760px;
+            color: var(--muted);
+            font-size: 15px;
+            line-height: 1.7;
+        }
+
+        .hero-actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 24px;
+        }
+
+        .button {
+            min-height: 42px;
+            padding: 11px 15px;
+            border-radius: 13px;
+            border: 1px solid var(--line-strong);
+            background: #ffffff;
+            color: var(--text);
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 850;
+        }
+
+        .button.primary {
+            color: #ffffff;
+            background: linear-gradient(135deg, var(--blue), var(--cyan));
+            border-color: transparent;
+            box-shadow: 0 12px 26px rgba(37, 99, 235, 0.24);
+        }
+
+        .button:hover {
+            transform: translateY(-1px);
+        }
+
+        .priority-card {
+            padding: 22px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            background: linear-gradient(160deg, #ffffff, #f0f7ff);
+        }
+
+        .priority-card h3 {
+            font-size: 20px;
+            letter-spacing: -0.03em;
+        }
+
+        .legend {
+            display: grid;
+            gap: 10px;
+            margin-top: 16px;
+        }
+
+        .legend-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            padding: 13px 14px;
+            border-radius: 16px;
+            background: var(--surface);
+            border: 1px solid var(--line);
+        }
+
+        .legend-key {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 850;
+        }
+
+        .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(12, minmax(0, 1fr));
+            gap: 18px;
+        }
+
+        .span-3 { grid-column: span 3; }
+        .span-4 { grid-column: span 4; }
+        .span-5 { grid-column: span 5; }
+        .span-6 { grid-column: span 6; }
+        .span-7 { grid-column: span 7; }
+        .span-8 { grid-column: span 8; }
+        .span-12 { grid-column: span 12; }
+
+        .metric-card {
+            position: relative;
+            overflow: hidden;
+            padding: 20px;
+        }
+
+        .metric-card::after {
+            content: "";
+            position: absolute;
+            right: -32px;
+            bottom: -38px;
+            width: 110px;
+            height: 110px;
+            border-radius: 50%;
+            background: rgba(37, 99, 235, 0.07);
+        }
+
+        .kpi-title {
+            color: var(--muted);
+            font-size: 13px;
+            font-weight: 800;
+        }
+
+        .kpi-value {
+            margin-top: 10px;
+            font-size: 34px;
+            font-weight: 950;
+            letter-spacing: -0.05em;
+        }
+
+        .kpi-foot {
+            margin-top: 8px;
+            color: var(--muted);
+            font-size: 12px;
+            line-height: 1.5;
+        }
+
+        .section-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+
+        .section-title {
+            display: flex;
+            flex-direction: column;
+            gap: 7px;
+        }
+
+        .section-kicker {
+            width: fit-content;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: var(--blue-soft);
+            color: var(--blue);
+            font-size: 11px;
+            font-weight: 950;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .section-head h3 {
+            font-size: 21px;
+            letter-spacing: -0.035em;
+        }
+
+        .pill {
+            flex: 0 0 auto;
+            padding: 8px 11px;
+            border-radius: 999px;
+            background: var(--blue-soft);
+            color: var(--blue);
+            font-size: 12px;
+            font-weight: 850;
+        }
+
+        .chart-wrap {
+            height: 280px;
+        }
+
+        .ranking-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .ranking-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 15px;
+            border-radius: 16px;
+            background: var(--surface-soft);
+            border: 1px solid var(--line);
+        }
+
+        .ranking-copy {
+            min-width: 0;
+        }
+
+        .ranking-row strong {
+            display: block;
+            margin-bottom: 4px;
+            word-break: break-word;
+        }
+
+        .ranking-score {
+            flex: 0 0 auto;
+            min-width: 82px;
+            padding: 8px 10px;
+            border-radius: 12px;
+            background: var(--blue-soft);
+            color: var(--blue);
+            font-size: 12px;
+            font-weight: 900;
+            text-align: center;
+        }
+
+        .risk-list {
+            display: flex;
+            gap: 12px;
+            margin: 0 -4px;
+            padding: 4px 4px 12px;
+            overflow-x: auto;
+            overflow-y: hidden;
+            scroll-snap-type: x proximity;
+            scrollbar-color: rgba(37, 99, 235, 0.38) rgba(31, 74, 125, 0.08);
+        }
+
+        .risk-row {
+            flex: 0 0 min(330px, 82vw);
+            min-width: 0;
+            padding: 16px;
+            border-radius: 18px;
+            background: linear-gradient(160deg, #fff7f7, #ffffff);
+            border: 1px solid rgba(220, 38, 38, 0.15);
+            cursor: pointer;
+            scroll-snap-align: start;
+            transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+        }
+
+        .risk-row:hover,
+        .risk-row:focus {
+            border-color: rgba(220, 38, 38, 0.34);
+            box-shadow: 0 16px 34px rgba(220, 38, 38, 0.12);
+            outline: none;
+            transform: translateY(-2px);
+        }
+
+        .risk-row.selected {
+            border-color: rgba(220, 38, 38, 0.45);
+            box-shadow: inset 0 0 0 2px rgba(220, 38, 38, 0.12), 0 16px 32px rgba(220, 38, 38, 0.14);
+        }
+
+        .risk-row strong {
+            display: block;
+            margin: 10px 0 8px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .risk-meta,
+        .risk-evidence {
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.45;
+        }
+
+        .risk-topline {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .risk-score {
+            flex: 0 0 auto;
+            padding: 7px 10px;
+            border-radius: 999px;
+            background: var(--danger-soft);
+            color: var(--danger);
+            font-size: 12px;
+            font-weight: 900;
+        }
+
+        .toolbar {
+            display: grid;
+            grid-template-columns: minmax(210px, 1.4fr) repeat(3, minmax(130px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .control {
+            width: 100%;
+            min-height: 44px;
+            border-radius: 14px;
+            border: 1px solid var(--line-strong);
+            background: #ffffff;
+            color: var(--text);
+            font-size: 14px;
+            padding: 11px 13px;
+        }
+
+        .control:focus,
+        .button:focus {
+            outline: 3px solid rgba(37, 99, 235, 0.16);
+            outline-offset: 1px;
+        }
+
+        .toolbar-foot {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 10px;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .table-scroll {
+            max-height: 560px;
+            overflow: auto;
+            border-radius: 18px;
+            border: 1px solid var(--line);
+            background: #ffffff;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 14px 12px;
+            border-bottom: 1px solid var(--line);
+            font-size: 13px;
+            vertical-align: top;
+        }
+
+        th {
+            color: #718096;
+            background: #f8fbff;
+            font-weight: 900;
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+
+        .log-row {
+            cursor: pointer;
+            transition: background 0.18s ease, box-shadow 0.18s ease;
+        }
+
+        .log-row:hover,
+        .log-row:focus {
+            background: #f1f7ff;
+            outline: none;
+        }
+
+        .log-row.selected {
+            background: #eaf1ff;
+            box-shadow: inset 4px 0 0 var(--blue);
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 82px;
+            padding: 7px 9px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 950;
+        }
+
+        .badge.blocked { background: var(--danger-soft); color: var(--danger); }
+        .badge.warned { background: var(--warn-soft); color: var(--warn); }
+        .badge.allowed { background: var(--ok-soft); color: var(--ok); }
+
+        .empty {
+            padding: 24px;
+            border-radius: 18px;
+            background: var(--surface-soft);
+            color: var(--muted);
+            text-align: center;
+        }
+
+        .pagination-bar {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 14px;
+            flex-wrap: wrap;
+        }
+
+        .page-button {
+            width: auto;
+            min-height: 36px;
+            padding: 8px 12px;
+            font-size: 13px;
+        }
+
+        .page-button.active {
+            color: #ffffff;
+            background: var(--blue);
+            border-color: var(--blue);
+        }
+
+        .detail-panel {
+            margin-top: 16px;
+            padding: 18px;
+            border-radius: 20px;
+            background: linear-gradient(160deg, #ffffff, #f2f8ff);
+            border: 1px solid var(--line);
+        }
+
+        .detail-panel-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 14px;
+            margin-bottom: 16px;
+        }
+
+        .detail-panel-head h4 {
+            margin: 0;
+            font-size: 20px;
+            letter-spacing: -0.03em;
+        }
+
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+
+        .detail-item {
+            padding: 14px 16px;
+            border-radius: 16px;
+            background: #ffffff;
+            border: 1px solid var(--line);
+        }
+
+        .detail-label {
+            color: var(--muted);
+            font-size: 12px;
+            margin-bottom: 6px;
+        }
+
+        .detail-value {
+            font-size: 15px;
+            font-weight: 850;
+            word-break: break-word;
+        }
+
+        .detail-muted {
+            color: var(--muted);
+            font-size: 13px;
+            line-height: 1.55;
+        }
+
+        .evidence-box {
+            padding: 18px;
+            border-radius: 18px;
+            background: #fffdf7;
+            border: 1px solid rgba(245, 158, 11, 0.22);
+        }
+
+        .evidence-box h4 {
+            margin: 0 0 10px;
+            font-size: 18px;
+        }
+
+        .keyword-list {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
+
+        .keyword-chip {
+            padding: 7px 10px;
+            border-radius: 999px;
+            background: var(--blue-soft);
+            color: var(--blue);
+            font-size: 12px;
+            font-weight: 900;
+        }
+
+        .page-intro {
+            margin-bottom: 18px;
+            padding: 24px;
+            background: linear-gradient(135deg, #ffffff, #f0f7ff);
+        }
+
+        .page-intro h2 {
+            font-size: clamp(1.6rem, 3vw, 2.45rem);
+            letter-spacing: -0.045em;
+        }
+
+        .page-intro p {
+            margin-top: 10px;
+            color: var(--muted);
+            line-height: 1.65;
+        }
+
+        @media (max-width: 1180px) {
+            .app-shell {
+                grid-template-columns: 1fr;
+            }
+
+            .sidebar {
+                position: static;
+                height: auto;
+                flex-direction: row;
+                align-items: center;
+                flex-wrap: wrap;
+            }
+
+            .brand {
+                border-bottom: 0;
+                padding-bottom: 10px;
+            }
+
+            .nav-group {
+                display: flex;
+                flex-wrap: wrap;
+            }
+
+            .sidebar-card {
+                display: none;
+            }
+
+            .hero,
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            .span-3,
+            .span-4,
+            .span-5,
+            .span-6,
+            .span-7,
+            .span-8,
+            .span-12 {
+                grid-column: span 1;
+            }
+        }
+
+        @media (max-width: 760px) {
+            .main {
+                padding: 16px;
+            }
+
+            .topbar {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .topbar-meta {
+                justify-content: flex-start;
+            }
+
+            .hero-main,
+            .priority-card,
+            .card,
+            .page-intro {
+                padding: 18px;
+            }
+
+            .toolbar {
+                grid-template-columns: 1fr;
+            }
+
+            .toolbar-foot,
+            .detail-panel-head,
+            .section-head {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .detail-grid {
+                grid-template-columns: 1fr;
+            }
+
+            table,
+            thead,
+            tbody,
+            th,
+            td,
+            tr {
+                display: block;
+            }
+
+            thead {
+                display: none;
+            }
+
+            td {
+                padding: 10px 12px;
+            }
+
+            tr {
+                border-bottom: 1px solid var(--line);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand-mark">DLP</div>
+                <div>
+                    <strong>Host DLP Console</strong>
+                    <span>AI Sensitive Data Guard</span>
+                </div>
+            </div>
+            <nav class="nav-group" aria-label="Main navigation">
+                <div class="nav-label">Workspace</div>
+                <a class="nav-link" id="navDashboard" href="/dashboard">
+                    <span class="nav-icon">⌂</span>
+                    Dashboard
+                </a>
+                <a class="nav-link" id="navLogs" href="/logs">
+                    <span class="nav-icon">≣</span>
+                    Logs
+                </a>
+                <a class="nav-link" href="/docs">
+                    <span class="nav-icon">?</span>
+                    API Docs
+                </a>
+            </nav>
+        </aside>
+
+        <main class="main">
+            <header class="topbar">
+                <div>
+                    <div class="page-eyebrow" id="pageEyebrow">Dashboard</div>
+                    <h1 id="pageTitle">민감정보 파일 반출 탐지 현황</h1>
+                </div>
+                <div class="topbar-meta">
+                    <span class="status-pill"><span class="status-dot"></span> API <strong id="apiStatus">확인 중</strong></span>
+                    <span class="status-pill">최근 조회 <strong id="lastUpdated">-</strong></span>
+                    <span class="status-pill">최다 채널 <strong id="topChannel">-</strong></span>
+                </div>
+            </header>
+
+            <section class="page" id="dashboardPage">
+                <section class="hero">
+                    <div class="panel hero-main">
+                        <span class="section-kicker">AI Host DLP</span>
+                        <h2>민감정보 파일 반출 탐지를 위한<br>AI 기반 Host DLP 시스템</h2>
+                        <p class="hero-copy">
+                            Host Agent가 수집한 이벤트와 AI 민감도 분석 결과를 통합해서 보여주는 관리자 대시보드입니다.<br>
+                            차단 현황, 채널 분포, 부서별 위험도와 상세 탐지 근거를 빠르게 확인할 수 있습니다.
+                        </p>
+                        <div class="hero-actions">
+                            <a class="button primary" href="/logs">로그 상세 분석 보기</a>
+                            <a class="button" href="/docs">API 문서 확인</a>
+                        </div>
+                    </div>
+                    <aside class="panel priority-card">
+                        <div>
+                            <span class="section-kicker">Priority</span>
+                            <h3>대응 우선순위</h3>
+                            <div class="legend">
+                                <div class="legend-item">
+                                    <span class="legend-key"><span class="dot" style="background:#dc2626;"></span>차단 이벤트</span>
+                                    <strong id="blockedPriority">0건</strong>
+                                </div>
+                                <div class="legend-item">
+                                    <span class="legend-key"><span class="dot" style="background:#d97706;"></span>경고 이벤트</span>
+                                    <strong id="warnedPriority">0건</strong>
+                                </div>
+                                <div class="legend-item">
+                                    <span class="legend-key"><span class="dot" style="background:#16a34a;"></span>허용 이벤트</span>
+                                    <strong id="allowedPriority">0건</strong>
+                                </div>
+                            </div>
+                        </div>
+                        <p class="hero-copy">Host Agent가 `POST /api/v1/logs`로 전송한 이벤트가 요약 카드와 차트에 반영됩니다.</p>
+                    </aside>
+                </section>
+
+                <section class="grid">
+                    <div class="panel metric-card span-3">
+                        <div class="kpi-title">최근 7일 총 이벤트</div>
+                        <div class="kpi-value" id="totalEvents">0</div>
+                        <div class="kpi-foot">Host DLP가 수집한 누적 이벤트 수</div>
+                    </div>
+                    <div class="panel metric-card span-3">
+                        <div class="kpi-title">평균 AI 민감도</div>
+                        <div class="kpi-value" id="avgScore">0.00</div>
+                        <div class="kpi-foot">0.00 ~ 1.00 스케일</div>
+                    </div>
+                    <div class="panel metric-card span-3">
+                        <div class="kpi-title">최다 위험 부서</div>
+                        <div class="kpi-value" id="topDepartment">-</div>
+                        <div class="kpi-foot">탐지 건수 기준 상위 부서</div>
+                    </div>
+                    <div class="panel metric-card span-3">
+                        <div class="kpi-title">차단 비율</div>
+                        <div class="kpi-value" id="blockedRate">0%</div>
+                        <div class="kpi-foot">최근 7일 이벤트 기준</div>
+                    </div>
+
+                    <div class="panel card span-12">
+                        <div class="section-head">
+                            <div class="section-title">
+                                <span class="section-kicker">Priority Alert</span>
+                                <h3>고위험 이벤트 알림</h3>
+                            </div>
+                            <span class="pill">최신순 · 차단 또는 AI 0.85 이상</span>
+                        </div>
+                        <div id="highRiskEvents" class="risk-list"></div>
+                    </div>
+
+                    <div class="panel card span-7">
+                        <div class="section-head">
+                            <div class="section-title">
+                                <span class="section-kicker">Trend</span>
+                                <h3>일자별 탐지 추이</h3>
+                            </div>
+                            <span class="pill">최근 7일</span>
+                        </div>
+                        <div class="chart-wrap">
+                            <canvas id="timelineChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="panel card span-5">
+                        <div class="section-head">
+                            <div class="section-title">
+                                <span class="section-kicker">Channel</span>
+                                <h3>유출 채널 분포</h3>
+                            </div>
+                            <span class="pill">전송 경로</span>
+                        </div>
+                        <div class="chart-wrap">
+                            <canvas id="channelChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="panel card span-4">
+                        <div class="section-head">
+                            <div class="section-title">
+                                <span class="section-kicker">Department</span>
+                                <h3>부서별 위험도</h3>
+                            </div>
+                            <span class="pill">상위 5개</span>
+                        </div>
+                        <div id="departmentRanking" class="ranking-list"></div>
+                    </div>
+
+                    <div class="panel card span-8">
+                        <div class="section-head">
+                            <div class="section-title">
+                                <span class="section-kicker">Recent Logs</span>
+                                <h3>최근 탐지 로그</h3>
+                            </div>
+                            <a class="pill" href="/logs">전체 로그 보기</a>
+                        </div>
+                        <div id="recentLogsWrap"></div>
+                    </div>
+                </section>
+            </section>
+
+            <section class="page" id="logsPage">
+                <section class="panel page-intro">
+                    <span class="section-kicker">Log Analysis</span>
+                    <h2>탐지 로그 상세 분석</h2>
+                        <p>조건 기반으로 로그를 좁혀 보고, 선택한 로그의 Host 정보, Agent 식별자, AI 점수, 매칭 키워드와 탐지 근거를 확인합니다.</p>
+                </section>
+
+                <section class="panel card">
+                    <div class="section-head">
+                        <div class="section-title">
+                            <span class="section-kicker">Evidence</span>
+                            <h3>실시간 로그 분석</h3>
+                        </div>
+                        <span class="pill">10건씩 보기</span>
+                    </div>
+                    <div class="toolbar">
+                        <input id="searchInput" class="control" type="search" placeholder="파일명, 경로, 사용자, Agent, 이벤트 ID 검색">
+                        <select id="actionFilter" class="control">
+                            <option value="">전체 조치</option>
+                            <option value="BLOCKED">BLOCKED</option>
+                            <option value="WARNED">WARNED</option>
+                            <option value="ALLOWED">ALLOWED</option>
+                        </select>
+                        <select id="channelFilter" class="control">
+                            <option value="">전체 채널</option>
+                            <option value="USB_COPY">USB_COPY</option>
+                            <option value="WEB_UPLOAD">WEB_UPLOAD</option>
+                            <option value="EMAIL_ATTACHMENT">EMAIL_ATTACHMENT</option>
+                            <option value="PRINT">PRINT</option>
+                            <option value="MESSENGER">MESSENGER</option>
+                        </select>
+                        <select id="departmentFilter" class="control">
+                            <option value="">전체 부서</option>
+                        </select>
+                        <select id="userFilter" class="control">
+                            <option value="">전체 사용자</option>
+                        </select>
+                        <input id="startDateFilter" class="control" type="date" aria-label="시작 날짜">
+                        <input id="endDateFilter" class="control" type="date" aria-label="종료 날짜">
+                        <button id="refreshLogsButton" class="button" type="button">새로고침</button>
+                    </div>
+                    <div class="toolbar-foot">
+                        <span id="logMeta">최근 로그를 불러오는 중입니다.</span>
+                        <span>필터 변경 시 로그 목록과 상세 선택이 갱신됩니다.</span>
+                    </div>
+                    <div id="logTableWrap"></div>
+                    <div id="logDetailPanel"></div>
+                </section>
+            </section>
+        </main>
+    </div>
+
+    <script>
+        const LOGS_PER_PAGE = 10;
+        const params = new URLSearchParams(window.location.search);
+        let currentPage = window.location.pathname === "/logs" ? "logs" : "dashboard";
+        let pendingLogId = params.get("log_id") ? Number(params.get("log_id")) : null;
+        let currentLogItems = [];
+        let currentHighRiskItems = [];
+        let currentLogPage = 1;
+        let selectedLogId = null;
+        let currentLogDetail = null;
+
+        function setPage(page) {
+            currentPage = page;
+            document.getElementById("dashboardPage").classList.toggle("active", page === "dashboard");
+            document.getElementById("logsPage").classList.toggle("active", page === "logs");
+            document.getElementById("navDashboard").classList.toggle("active", page === "dashboard");
+            document.getElementById("navLogs").classList.toggle("active", page === "logs");
+            document.getElementById("pageEyebrow").textContent = page === "logs" ? "Logs" : "Dashboard";
+            document.getElementById("pageTitle").textContent = page === "logs"
+                ? "탐지 로그 상세 분석"
+                : "민감정보 파일 반출 탐지 현황";
+        }
+
+        setPage(currentPage);
+
+        const timelineChart = new Chart(document.getElementById("timelineChart"), {
+            type: "line",
+            data: {
+                labels: [],
+                datasets: [{
+                    label: "탐지 건수",
+                    data: [],
+                    borderColor: "#2563eb",
+                    backgroundColor: "rgba(37, 99, 235, 0.14)",
+                    fill: true,
+                    tension: 0.35,
+                    pointRadius: 4,
+                    pointBackgroundColor: "#2563eb"
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false }
+                },
+                scales: {
+                    x: {
+                        grid: { display: false }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        ticks: { precision: 0 }
+                    }
+                }
+            }
+        });
+
+        const channelChart = new Chart(document.getElementById("channelChart"), {
+            type: "doughnut",
+            data: {
+                labels: [],
+                datasets: [{
+                    data: [],
+                    backgroundColor: ["#2563eb", "#0ea5e9", "#16a34a", "#d97706", "#dc2626"],
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: "bottom"
+                    }
+                }
+            }
+        });
+
+        function actionBadgeClass(action) {
+            if (action === "BLOCKED") return "blocked";
+            if (action === "WARNED") return "warned";
+            return "allowed";
+        }
+
+        function setText(id, value) {
+            document.getElementById(id).textContent = value;
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? "")
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;")
+                .replaceAll('"', "&quot;")
+                .replaceAll("'", "&#039;");
+        }
+
+        function renderDepartmentRanking(items) {
+            const container = document.getElementById("departmentRanking");
+            if (!items.length) {
+                container.innerHTML = '<div class="empty">아직 수집된 부서별 이벤트가 없습니다.</div>';
+                return;
+            }
+
+            container.innerHTML = items.map((item, index) => `
+                <div class="ranking-row">
+                    <div class="ranking-copy">
+                        <strong>${index + 1}. ${escapeHtml(item.department)}</strong>
+                        <div class="detail-muted">${item.count}건 탐지</div>
+                    </div>
+                    <div class="ranking-score">${Math.max(10, item.count * 10)}점</div>
+                </div>
+            `).join("");
+        }
+
+        function renderHighRiskEvents(items) {
+            const container = document.getElementById("highRiskEvents");
+            currentHighRiskItems = items;
+            if (!items.length) {
+                container.innerHTML = '<div class="empty">현재 표시할 고위험 이벤트가 없습니다.</div>';
+                return;
+            }
+
+            container.innerHTML = items.map(item => `
+                <div
+                    class="risk-row ${selectedLogId === item.log_id ? "selected" : ""}"
+                    data-log-id="${item.log_id}"
+                    tabindex="0"
+                    title="로그 상세 분석으로 이동"
+                >
+                    <div class="risk-topline">
+                        <span class="badge ${actionBadgeClass(item.action_taken)}">${escapeHtml(item.action_taken)}</span>
+                        <span class="risk-score">AI ${Number(item.ai_score).toFixed(2)}</span>
+                    </div>
+                    <strong title="${escapeHtml(item.file_name)}">${escapeHtml(item.file_name)}</strong>
+                    <div class="risk-meta">
+                        ${escapeHtml(item.department)} · ${escapeHtml(item.user_id)}<br>
+                        ${escapeHtml(item.leak_channel)} · ${new Date(item.timestamp).toLocaleString("ko-KR")}
+                    </div>
+                    <div class="risk-evidence">${escapeHtml(item.evidence_summary || "탐지 근거 없음")}</div>
+                </div>
+            `).join("");
+
+            container.querySelectorAll(".risk-row").forEach(row => {
+                row.addEventListener("click", () => handleHighRiskSelect(row.dataset.logId));
+                row.addEventListener("keydown", event => {
+                    if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        handleHighRiskSelect(row.dataset.logId);
+                    }
+                });
+            });
+        }
+
+        function handleHighRiskSelect(logId) {
+            if (currentPage !== "logs") {
+                window.location.href = `/logs?log_id=${encodeURIComponent(logId)}`;
+                return;
+            }
+            focusHighRiskLog(logId);
+        }
+
+        function renderRecentLogs(items) {
+            const container = document.getElementById("recentLogsWrap");
+            const recentItems = items.slice(0, 5);
+            if (!recentItems.length) {
+                container.innerHTML = '<div class="empty">최근 로그가 없습니다.</div>';
+                return;
+            }
+
+            container.innerHTML = `
+                <div class="table-scroll" style="max-height:360px;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>시간</th>
+                                <th>파일명</th>
+                                <th>사용자</th>
+                                <th>채널</th>
+                                <th>조치</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${recentItems.map(item => `
+                                <tr class="log-row" data-log-id="${item.log_id}" tabindex="0" title="로그 상세 분석으로 이동">
+                                    <td>${new Date(item.timestamp).toLocaleString("ko-KR")}</td>
+                                    <td>${escapeHtml(item.file_name)}</td>
+                                    <td>${escapeHtml(item.user_id)}</td>
+                                    <td>${escapeHtml(item.leak_channel)}</td>
+                                    <td><span class="badge ${actionBadgeClass(item.action_taken)}">${escapeHtml(item.action_taken)}</span></td>
+                                </tr>
+                            `).join("")}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+
+            container.querySelectorAll(".log-row").forEach(row => {
+                row.addEventListener("click", () => {
+                    window.location.href = `/logs?log_id=${encodeURIComponent(row.dataset.logId)}`;
+                });
+            });
+        }
+
+        function renderLogDetail(item) {
+            const container = document.getElementById("logDetailPanel");
+            if (!item) {
+                container.innerHTML = `
+                    <div class="detail-panel">
+                        <div class="detail-panel-head">
+                            <div>
+                                <h4>상세 분석 패널</h4>
+                        <p class="detail-muted">로그 행을 선택하면 탐지 근거와 Agent 전송 정보를 자세히 확인할 수 있습니다.</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            if (item.loading) {
+                container.innerHTML = `
+                    <div class="detail-panel">
+                        <div class="detail-muted">상세 정보를 불러오는 중입니다.</div>
+                    </div>
+                `;
+                return;
+            }
+
+            const keywords = item.matched_keywords?.length
+                ? item.matched_keywords.map(keyword => `<span class="keyword-chip">${escapeHtml(keyword)}</span>`).join("")
+                : '<span class="detail-muted">매칭된 키워드 없음</span>';
+            const eventId = item.event_id || "-";
+            const agentId = item.agent_id || "-";
+            const filePath = item.file_path || "-";
+            const processName = item.process_name || "-";
+            const policyId = item.policy_id || "-";
+            const latency = item.latency_ms ?? "-";
+            const latencyText = latency === "-" ? "-" : `${Number(latency).toLocaleString("ko-KR")} ms`;
+
+            container.innerHTML = `
+                <div class="detail-panel">
+                    <div class="detail-panel-head">
+                        <div>
+                            <h4>${escapeHtml(item.file_name)}</h4>
+                            <p class="detail-muted">로그 ID ${escapeHtml(item.log_id)} · ${new Date(item.timestamp).toLocaleString("ko-KR")}</p>
+                        </div>
+                        <span class="badge ${actionBadgeClass(item.action_taken)}">${escapeHtml(item.action_taken)}</span>
+                    </div>
+                    <div class="detail-grid">
+                        <div class="detail-item">
+                            <div class="detail-label">사용자 / 부서</div>
+                            <div class="detail-value">${escapeHtml(item.user_id)} · ${escapeHtml(item.department)}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Host 정보</div>
+                            <div class="detail-value">${escapeHtml(item.hostname)} (${escapeHtml(item.host_ip)})</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">Agent / Event</div>
+                            <div class="detail-value">${escapeHtml(agentId)}<br><span class="detail-muted">${escapeHtml(eventId)}</span></div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">파일 경로</div>
+                            <div class="detail-value">${escapeHtml(filePath)}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">프로세스 / 정책</div>
+                            <div class="detail-value">${escapeHtml(processName)} · ${escapeHtml(policyId)}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">반출 채널</div>
+                            <div class="detail-value">${escapeHtml(item.leak_channel)}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">탐지 방식 / AI 점수</div>
+                            <div class="detail-value">${escapeHtml(item.detection_type)} · ${Number(item.ai_score).toFixed(2)}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">응답 지연</div>
+                            <div class="detail-value">${escapeHtml(latencyText)}</div>
+                        </div>
+                    </div>
+                    <div class="evidence-box">
+                        <h4>탐지 근거</h4>
+                        <p class="detail-muted">${escapeHtml(item.evidence_summary || "탐지 근거 요약이 없습니다.")}</p>
+                        <p class="detail-muted">${escapeHtml(item.decision_reason || "조치 판단 사유가 없습니다.")}</p>
+                        <div class="keyword-list">${keywords}</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function scrollSelectedLogRow() {
+            window.requestAnimationFrame(() => {
+                const row = document.querySelector(`#logTableWrap .log-row[data-log-id="${selectedLogId}"]`);
+                if (!row) return;
+                row.scrollIntoView({
+                    behavior: "smooth",
+                    block: "center",
+                    inline: "nearest"
+                });
+            });
+        }
+
+        async function loadLogDetail(logId, scrollTarget = "detail") {
+            selectedLogId = Number(logId);
+            currentLogDetail = { loading: true };
+            renderLogs(currentLogItems);
+            renderHighRiskEvents(currentHighRiskItems);
+            renderLogDetail(currentLogDetail);
+            if (scrollTarget === "detail") {
+                document.getElementById("logDetailPanel").scrollIntoView({
+                    behavior: "smooth",
+                    block: "center"
+                });
+            } else if (scrollTarget === "row") {
+                scrollSelectedLogRow();
+            }
+
+            try {
+                const response = await fetch(`/api/v1/logs/${selectedLogId}`);
+                if (!response.ok) throw new Error("Log detail request failed.");
+                currentLogDetail = await response.json();
+                renderLogDetail(currentLogDetail);
+            } catch (error) {
+                currentLogDetail = null;
+                renderLogDetail(null);
+                setText("logMeta", "상세 정보를 불러오지 못했습니다.");
+                console.error(error);
+            }
+        }
+
+        async function focusHighRiskLog(logId) {
+            const targetLogId = Number(logId);
+            let itemIndex = currentLogItems.findIndex(item => item.log_id === targetLogId);
+
+            if (itemIndex === -1) {
+                document.getElementById("searchInput").value = "";
+                document.getElementById("actionFilter").value = "";
+                document.getElementById("channelFilter").value = "";
+                document.getElementById("departmentFilter").value = "";
+                document.getElementById("userFilter").value = "";
+                document.getElementById("startDateFilter").value = "";
+                document.getElementById("endDateFilter").value = "";
+
+                const response = await fetch("/api/v1/logs?limit=200");
+                const logs = await response.json();
+                currentLogItems = logs.items;
+                itemIndex = currentLogItems.findIndex(item => item.log_id === targetLogId);
+            }
+
+            if (itemIndex >= 0) {
+                currentLogPage = Math.floor(itemIndex / LOGS_PER_PAGE) + 1;
+            }
+
+            await loadLogDetail(targetLogId, itemIndex >= 0 ? "row" : "detail");
+        }
+
+        function renderLogs(items) {
+            const container = document.getElementById("logTableWrap");
+            currentLogItems = items;
+            if (!items.length) {
+                currentLogPage = 1;
+                setText("logMeta", "필터 결과 0건");
+                container.innerHTML = '<div class="empty">로그가 아직 없습니다. Host Agent가 이벤트를 보내면 여기에 표시됩니다.</div>';
+                renderLogDetail(null);
+                return;
+            }
+
+            const totalPages = Math.max(1, Math.ceil(items.length / LOGS_PER_PAGE));
+            if (currentLogPage > totalPages) {
+                currentLogPage = totalPages;
+            }
+
+            const startIndex = (currentLogPage - 1) * LOGS_PER_PAGE;
+            const visibleItems = items.slice(startIndex, startIndex + LOGS_PER_PAGE);
+            const summaryText = totalPages > 1
+                ? `필터 결과 ${items.length}건 중 ${startIndex + 1}-${startIndex + visibleItems.length}건 표시`
+                : `현재 ${items.length}건 표시 중`;
+            setText("logMeta", summaryText);
+
+            container.innerHTML = `
+                <div class="table-scroll">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>시간</th>
+                                <th>사용자 / PC</th>
+                                <th>파일명</th>
+                                <th>채널</th>
+                                <th>엔진</th>
+                                <th>AI 점수</th>
+                                <th>조치</th>
+                                <th>근거</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${visibleItems.map(item => `
+                                <tr
+                                    class="log-row ${selectedLogId === item.log_id ? "selected" : ""}"
+                                    data-log-id="${item.log_id}"
+                                    tabindex="0"
+                                    title="상세 분석 보기"
+                                >
+                                    <td>${new Date(item.timestamp).toLocaleString("ko-KR")}</td>
+                                    <td>${escapeHtml(item.user_id)}<br>${escapeHtml(item.hostname)} (${escapeHtml(item.host_ip)})</td>
+                                    <td>${escapeHtml(item.file_name)}<br><span style="color:var(--muted);">${escapeHtml(item.file_path || item.department)}</span></td>
+                                    <td>${escapeHtml(item.leak_channel)}</td>
+                                    <td>${escapeHtml(item.detection_type)}</td>
+                                    <td>${Number(item.ai_score).toFixed(2)}</td>
+                                    <td><span class="badge ${actionBadgeClass(item.action_taken)}">${escapeHtml(item.action_taken)}</span></td>
+                                    <td>${item.matched_keywords.map(escapeHtml).join(", ") || "-"}<br><span style="color:var(--muted);">${escapeHtml(item.decision_reason || item.evidence_summary || "설명 없음")}</span></td>
+                                </tr>
+                            `).join("")}
+                        </tbody>
+                    </table>
+                </div>
+                ${totalPages > 1 ? `
+                    <div class="pagination-bar">
+                        ${Array.from({ length: totalPages }, (_, index) => `
+                            <button
+                                class="button page-button ${currentLogPage === index + 1 ? "active" : ""}"
+                                type="button"
+                                data-page="${index + 1}"
+                            >
+                                ${index + 1}
+                            </button>
+                        `).join("")}
+                    </div>
+                ` : ""}
+            `;
+
+            container.querySelectorAll(".page-button").forEach(button => {
+                button.addEventListener("click", () => {
+                    currentLogPage = Number(button.dataset.page);
+                    renderLogs(currentLogItems);
+                });
+            });
+
+            container.querySelectorAll(".log-row").forEach(row => {
+                row.addEventListener("click", () => loadLogDetail(row.dataset.logId));
+                row.addEventListener("keydown", event => {
+                    if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        loadLogDetail(row.dataset.logId);
+                    }
+                });
+            });
+        }
+
+        function buildLogQuery() {
+            const params = new URLSearchParams();
+            const action = document.getElementById("actionFilter").value;
+            const channel = document.getElementById("channelFilter").value;
+            const department = document.getElementById("departmentFilter").value;
+            const userId = document.getElementById("userFilter").value;
+            const startDate = document.getElementById("startDateFilter").value;
+            const endDate = document.getElementById("endDateFilter").value;
+            const keyword = document.getElementById("searchInput").value.trim();
+
+            if (action) params.set("action", action);
+            if (channel) params.set("leak_channel", channel);
+            if (department) params.set("department", department);
+            if (userId) params.set("user_id", userId);
+            if (startDate) params.set("start_date", startDate);
+            if (endDate) params.set("end_date", endDate);
+            if (keyword) params.set("q", keyword);
+            params.set("limit", "50");
+
+            return `/api/v1/logs?${params.toString()}`;
+        }
+
+        function renderFilterOptions(options) {
+            const departmentFilter = document.getElementById("departmentFilter");
+            const userFilter = document.getElementById("userFilter");
+            const currentDepartment = departmentFilter.value;
+            const currentUser = userFilter.value;
+            departmentFilter.innerHTML = `
+                <option value="">전체 부서</option>
+                ${(options.departments || []).map(department => `
+                    <option value="${escapeHtml(department)}">${escapeHtml(department)}</option>
+                `).join("")}
+            `;
+            userFilter.innerHTML = `
+                <option value="">전체 사용자</option>
+                ${(options.users || []).map(user => `
+                    <option value="${escapeHtml(user)}">${escapeHtml(user)}</option>
+                `).join("")}
+            `;
+            departmentFilter.value = currentDepartment;
+            userFilter.value = currentUser;
+        }
+
+        async function loadFilterOptions() {
+            const response = await fetch("/api/v1/logs/filter-options");
+            const options = await response.json();
+            renderFilterOptions(options);
+        }
+
+        async function loadLogs() {
+            currentLogPage = 1;
+            selectedLogId = null;
+            currentLogDetail = null;
+            renderLogDetail(null);
+            renderHighRiskEvents(currentHighRiskItems);
+            const response = await fetch(buildLogQuery());
+            const logs = await response.json();
+            renderLogs(logs.items);
+            renderRecentLogs(logs.items);
+        }
+
+        async function loadDashboard() {
+            try {
+                const [health, summary] = await Promise.all([
+                    fetch("/health").then(res => res.json()),
+                    fetch("/api/v1/dashboard/summary").then(res => res.json())
+                ]);
+
+                setText("apiStatus", health.status.toUpperCase());
+                setText("lastUpdated", new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }));
+                setText("totalEvents", summary.kpis.total_events);
+                setText("avgScore", Number(summary.kpis.average_score).toFixed(2));
+                setText("topDepartment", summary.top_departments[0]?.department || "-");
+                setText("topChannel", summary.channel_breakdown[0]?.channel || "-");
+                setText("blockedPriority", `${summary.kpis.blocked_count}건`);
+                setText("warnedPriority", `${summary.kpis.warned_count}건`);
+                setText("allowedPriority", `${summary.kpis.allowed_count}건`);
+                const blockedRate = summary.kpis.total_events
+                    ? Math.round((summary.kpis.blocked_count / summary.kpis.total_events) * 100)
+                    : 0;
+                setText("blockedRate", `${blockedRate}%`);
+
+                timelineChart.data.labels = summary.timeline.map(item => item.date.slice(5));
+                timelineChart.data.datasets[0].data = summary.timeline.map(item => item.count);
+                timelineChart.update();
+
+                channelChart.data.labels = summary.channel_breakdown.map(item => item.channel);
+                channelChart.data.datasets[0].data = summary.channel_breakdown.map(item => item.count);
+                channelChart.update();
+
+                renderDepartmentRanking(summary.top_departments);
+                renderHighRiskEvents(summary.high_risk_events || []);
+                await loadFilterOptions();
+                await loadLogs();
+
+                if (currentPage === "logs" && pendingLogId) {
+                    await focusHighRiskLog(pendingLogId);
+                    pendingLogId = null;
+                }
+            } catch (error) {
+                setText("apiStatus", "ERROR");
+                setText("logMeta", "로그 정보를 불러오지 못했습니다.");
+                document.getElementById("logTableWrap").innerHTML =
+                    '<div class="empty">API 연결에 실패했습니다. FastAPI 서버가 실행 중인지 확인해주세요.</div>';
+                document.getElementById("departmentRanking").innerHTML =
+                    '<div class="empty">요약 정보를 불러오지 못했습니다.</div>';
+                document.getElementById("highRiskEvents").innerHTML =
+                    '<div class="empty">고위험 이벤트 정보를 불러오지 못했습니다.</div>';
+                renderLogDetail(null);
+                console.error(error);
+            }
+        }
+
+        document.getElementById("refreshLogsButton").addEventListener("click", loadLogs);
+        document.getElementById("actionFilter").addEventListener("change", loadLogs);
+        document.getElementById("channelFilter").addEventListener("change", loadLogs);
+        document.getElementById("departmentFilter").addEventListener("change", loadLogs);
+        document.getElementById("userFilter").addEventListener("change", loadLogs);
+        document.getElementById("startDateFilter").addEventListener("change", loadLogs);
+        document.getElementById("endDateFilter").addEventListener("change", loadLogs);
+        document.getElementById("searchInput").addEventListener("input", () => {
+            clearTimeout(window.logSearchTimer);
+            window.logSearchTimer = setTimeout(loadLogs, 250);
+        });
+
+        loadDashboard();
+    </script>
+</body>
+</html>

@@ -1,0 +1,531 @@
+# AI 기반 Host DLP 웹 대시보드
+
+Host Agent가 전송한 민감정보 반출 탐지 로그를 저장하고, 관리자가 통계와 상세 탐지 근거를 확인할 수 있도록 만든 FastAPI 기반 웹 대시보드입니다.
+
+현재 구현 범위는 다음과 같습니다.
+
+- Host Agent 로그 수집과 `event_id` 기반 중복 저장 방지
+- Agent 전용 토큰 인증
+- 탐지 로그 검색, 필터, 목록 및 상세 조회
+- 최근 7일 KPI, 탐지 추이, 채널 분포, 부서별 위험도 시각화
+- 고위험 이벤트와 Evidence 상세 분석
+- Mock AI 분석 및 외부 AI 서버 전달 구조
+- 정책 조회·생성 API
+
+## 1. 기술 구성
+
+- Python 3.10 이상
+- FastAPI 0.135.2
+- Uvicorn 0.42.0
+- SQLite
+- HTML/CSS/JavaScript
+- Chart.js CDN
+
+## 2. 디렉터리 구조
+
+```text
+web/
+├── backend/
+│   ├── main.py                 # FastAPI 앱, API, DB 초기화
+│   └── dlp_dashboard.db        # 실행 중 생성되는 로컬 SQLite DB
+├── frontend/
+│   └── index.html              # Dashboard/Logs 단일 페이지 UI
+├── scripts/
+│   ├── seed_demo_data.py       # 현재 날짜 기준 대시보드 데모 데이터 생성
+│   └── send_sample_log.py      # Agent 로그 및 AI 분석 흐름 시연 스크립트
+├── tests/
+│   ├── conftest.py             # 임시 DB와 TestClient 공통 fixture
+│   └── test_api.py             # API·DB·AI 자동화 테스트
+├── report/                     # 중간보고서와 이미지 자료
+├── .env.example                # 환경변수 예시
+├── pytest.ini                  # pytest 실행 설정
+├── requirements.txt            # 실행 의존성
+├── requirements-dev.txt        # 개발·테스트 의존성
+└── webplan.md                  # 상세 구현 진행 기록
+```
+
+`backend/dlp_dashboard.db`는 로컬 실행 데이터이므로 Git 병합 대상에서 제외합니다. 서버가 시작될 때 DB와 필수 테이블이 없으면 자동으로 생성됩니다.
+
+## 3. 설치
+
+프로젝트의 `web` 디렉터리에서 실행합니다.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+Windows PowerShell에서는 가상환경을 다음과 같이 활성화합니다.
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+TestClient와 이후 자동화 테스트까지 실행할 개발 환경은 다음 의존성을 설치합니다.
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
+## 4. 환경변수
+
+지원되는 환경변수는 다음과 같습니다.
+
+| 이름 | 필수 여부 | 기본 동작 | 설명 |
+| --- | --- | --- | --- |
+| `AGENT_API_TOKEN` | 팀 연동 시 필수 | 로컬 데모 토큰 사용 | Agent가 분석·로그 수집 API를 호출할 때 보내는 토큰 |
+| `AI_SERVER_URL` | 선택 | 내부 Mock 분석 | 실제 AI 서버 주소 |
+| `AI_SERVER_TOKEN` | 선택 | 미사용 | 외부 AI 서버에 전달하는 Bearer 토큰 |
+| `AI_SERVER_TIMEOUT_SECONDS` | 선택 | `5` | 외부 AI 서버 응답 대기 시간(초) |
+
+팀 공유 또는 시연 환경에서는 예시 파일을 복사한 뒤 토큰을 반드시 교체합니다.
+
+```bash
+cp .env.example .env
+```
+
+`.env` 파일은 자동으로 Git에 포함되지 않습니다. 실제 토큰은 문서나 소스 코드에 기록하지 않습니다.
+
+## 5. 서버 실행
+
+### 5.1 빠른 로컬 실행
+
+환경변수를 설정하지 않으면 내부 Mock AI 분석과 로컬 데모 Agent 토큰을 사용합니다.
+
+```bash
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+### 5.2 `.env`를 사용하는 팀 연동 실행
+
+```bash
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --env-file .env
+```
+
+실행 후 확인 URL은 다음과 같습니다.
+
+| 화면 또는 API | URL |
+| --- | --- |
+| 대시보드 | `http://127.0.0.1:8000/dashboard` |
+| 로그 상세 분석 | `http://127.0.0.1:8000/logs` |
+| Swagger API 문서 | `http://127.0.0.1:8000/docs` |
+| 상태 확인 | `http://127.0.0.1:8000/health` |
+
+`/health`의 `analysis_mode`가 `mock`이면 내부 Mock 분석, `external`이면 외부 AI 서버 전달 모드입니다.
+
+## 6. 주요 API
+
+| Method | Path | 토큰 | 용도 |
+| --- | --- | --- | --- |
+| `GET` | `/health` | 불필요 | 서버와 AI 분석 모드 확인 |
+| `POST` | `/api/v1/analyze` | `X-Agent-Token` | Mock 또는 외부 AI 분석 요청 |
+| `POST` | `/api/v1/logs` | `X-Agent-Token` | Host Agent 탐지 로그 저장 |
+| `GET` | `/api/v1/logs` | 불필요 | 로그 검색 및 필터 조회 |
+| `GET` | `/api/v1/logs/filter-options` | 불필요 | 부서·사용자·Agent 필터 목록 조회 |
+| `GET` | `/api/v1/logs/{log_id}` | 불필요 | 개별 로그 상세 조회 |
+| `GET` | `/api/v1/dashboard/summary` | 불필요 | 최근 기간 KPI와 차트 데이터 조회 |
+| `GET` | `/api/v1/policies` | 불필요 | 정책 목록 조회 |
+| `POST` | `/api/v1/policies` | 현재 불필요 | 정책 생성 |
+
+정확한 요청 필드와 허용값은 실행 중인 서버의 `/docs`에서 확인할 수 있습니다.
+
+### 6.1 Agent 로그 연동 규칙
+
+- 요청 헤더: `X-Agent-Token: <AGENT_API_TOKEN>`
+- `timestamp`: UTC offset을 포함한 ISO 8601 형식 권장
+- `event_id`: Agent 재전송 중복 방지를 위해 신규 연동에서는 항상 포함 권장
+- `ai_score`: `0.0` 이상 `1.0` 이하
+- `action_taken`: `BLOCKED`, `WARNED`, `ALLOWED`
+- `leak_channel`: `USB_COPY`, `WEB_UPLOAD`, `EMAIL_ATTACHMENT`, `PRINT`, `MESSENGER`
+- 최초 저장: HTTP `201`, `duplicate: false`
+- 동일한 `event_id` 재전송: HTTP `200`, `duplicate: true`
+
+샘플 JSON은 실제 전송 없이 다음 명령으로 확인할 수 있습니다.
+
+```bash
+python scripts/send_sample_log.py --scenario web_upload --dry-run
+```
+
+### 6.2 로그 수집 요청 데이터 구조
+
+Host Agent는 `POST /api/v1/logs`로 탐지 결과를 전송합니다. 요청 헤더에는 서버의 `AGENT_API_TOKEN`과 동일한 `X-Agent-Token`을 포함해야 합니다.
+
+| 필드 | JSON 타입 | 필수 여부 | 제약 및 설명 |
+| --- | --- | --- | --- |
+| `event_id` | string | 연동 시 필수 권장 | 최대 120자. Agent 재전송 중복 방지 키 |
+| `agent_id` | string | 선택 | 최대 100자. 이벤트를 전송한 Host Agent 식별자 |
+| `timestamp` | string | 필수 | UTC offset을 포함한 ISO 8601 발생 시각 |
+| `host_ip` | string | 필수 | 7~45자. 이벤트 발생 Host IP |
+| `hostname` | string | 필수 | 1~100자. 이벤트 발생 Host 이름 |
+| `user_id` | string | 필수 | 1~100자. 이벤트 발생 사용자 식별자 |
+| `department` | string | 필수 | 1~100자. 사용자 소속 부서 |
+| `file_name` | string | 필수 | 1~255자. 반출 대상 파일명 |
+| `file_path` | string | 선택 | 최대 500자. 반출 대상 파일의 원본 경로 |
+| `process_name` | string | 선택 | 최대 120자. 반출을 시도한 프로세스 |
+| `leak_channel` | string | 필수 | `USB_COPY`, `WEB_UPLOAD`, `EMAIL_ATTACHMENT`, `PRINT`, `MESSENGER` |
+| `detection_type` | string | 필수 | `RULE_BASED`, `AI_MODEL`, `HYBRID` |
+| `ai_score` | number | 필수 | `0.0`~`1.0` 범위의 민감도 점수 |
+| `matched_keywords` | string[] | 선택 | 탐지에 사용된 키워드. 생략 시 빈 배열 |
+| `policy_id` | string | 선택 | 최대 100자. 적용된 Agent/서버 정책 식별자 |
+| `action_taken` | string | 필수 | `BLOCKED`, `WARNED`, `ALLOWED` |
+| `decision_reason` | string | 선택 | 최대 500자. Agent의 최종 조치 판단 사유 |
+| `evidence_summary` | string | 선택 | 최대 500자. 관리자에게 표시할 탐지 근거 요약 |
+| `latency_ms` | integer | 선택 | `0`~`600000`. 분석 및 조치 지연 시간(ms) |
+
+전체 요청 예시:
+
+```json
+{
+  "event_id": "agent-01-web-upload-20260813-001",
+  "agent_id": "sentry-agent-01",
+  "timestamp": "2026-08-13T11:21:00+00:00",
+  "host_ip": "192.168.10.42",
+  "hostname": "employee-pc-01",
+  "user_id": "research_user",
+  "department": "R&D",
+  "file_name": "prototype_source_export.zip",
+  "file_path": "C:\\Research\\prototype_source_export.zip",
+  "process_name": "chrome.exe",
+  "leak_channel": "WEB_UPLOAD",
+  "detection_type": "HYBRID",
+  "ai_score": 0.96,
+  "matched_keywords": ["source_code", "api_key", "prototype"],
+  "policy_id": "DLP-WEB-001",
+  "action_taken": "BLOCKED",
+  "decision_reason": "AI score exceeded the web upload block threshold.",
+  "evidence_summary": "Source code and API key patterns were detected.",
+  "latency_ms": 132
+}
+```
+
+최초 저장 응답은 HTTP `201`입니다.
+
+```json
+{
+  "message": "Log saved successfully.",
+  "log_id": 37,
+  "event_id": "agent-01-web-upload-20260813-001",
+  "duplicate": false
+}
+```
+
+동일한 `event_id`를 다시 전송하면 새 행을 만들지 않고 HTTP `200`으로 기존 `log_id`를 반환합니다.
+
+```json
+{
+  "message": "Log already exists.",
+  "log_id": 37,
+  "event_id": "agent-01-web-upload-20260813-001",
+  "duplicate": true
+}
+```
+
+### 6.3 AI 분석 요청·응답 구조
+
+Host Agent가 웹 서버의 분석 중계 API를 사용할 경우 `POST /api/v1/analyze`를 호출합니다. `AI_SERVER_URL`이 비어 있으면 Mock 분석 결과를 반환하고, 값이 있으면 동일 요청을 외부 AI 서버로 전달합니다.
+
+요청 필드:
+
+| 필드 | JSON 타입 | 필수 여부 | 제약 및 설명 |
+| --- | --- | --- | --- |
+| `event_id` | string | 필수 | 1~120자. 이후 로그 저장 요청과 동일한 ID 사용 |
+| `channel` | string | 필수 | `clipboard`, `outlook`, `http`, `usb`, `web_upload`, `email_attachment`, `print`, `messenger` |
+| `user_id` | string | 필수 | 1~100자. 분석 대상 사용자 식별자 |
+| `matched_patterns` | string[] | 선택 | Agent 규칙 탐지 단계에서 찾은 패턴 목록 |
+| `snippet` | string | 필수 | 1~4000자. AI가 분석할 텍스트 또는 요약 |
+| `metadata` | object | 선택 | 앱, 목적지, 파일명, 심각도 등 추가 문맥 |
+
+요청 예시:
+
+```json
+{
+  "event_id": "agent-01-web-upload-20260813-001",
+  "channel": "web_upload",
+  "user_id": "research_user",
+  "matched_patterns": ["source_code", "api_key"],
+  "snippet": "Prototype source archive includes an internal API key.",
+  "metadata": {
+    "app": "chrome.exe",
+    "dest": "external",
+    "severity_hint": "high",
+    "file_name": "prototype_source_export.zip"
+  }
+}
+```
+
+웹 서버가 Agent에 반환하는 정규화 응답:
+
+| 필드 | JSON 타입 | 설명 |
+| --- | --- | --- |
+| `event_id` | string | 요청 이벤트 식별자 |
+| `decision` | string | `allow`, `review`, `block` |
+| `confidence_score` | number | `0.0`~`1.0` 범위로 정규화된 점수 |
+| `model_version` | string | 분석 모델 버전 |
+| `latency_ms` | integer | 분석 응답 지연 시간(ms) |
+| `evidence_summary` | string | AI 분석 근거 요약 |
+
+```json
+{
+  "event_id": "agent-01-web-upload-20260813-001",
+  "decision": "block",
+  "confidence_score": 0.96,
+  "model_version": "team-ai-v1",
+  "latency_ms": 132,
+  "evidence_summary": "Source code and API key context was detected."
+}
+```
+
+Agent가 분석 결과를 로그 저장 필드로 변환할 때 사용하는 규칙:
+
+| AI `decision` | 로그 `action_taken` |
+| --- | --- |
+| `allow` | `ALLOWED` |
+| `review` | `WARNED` |
+| `block` | `BLOCKED` |
+
+외부 AI 서버는 `confidence_score` 대신 `ai_score` 또는 `score`를 반환할 수 있습니다. `1` 초과 `100` 이하의 점수는 웹 서버가 `0.0`~`1.0` 범위로 변환합니다.
+
+### 6.4 SQLite 데이터 구조
+
+SQLite 파일은 `backend/dlp_dashboard.db`에 생성되지만 Git에는 포함하지 않습니다. 팀원 간 데이터 연동은 DB 파일을 공유하지 않고 위 REST API 계약을 기준으로 합니다.
+
+`dlp_logs` 테이블:
+
+| 컬럼 | SQLite 타입 | 제약 및 설명 |
+| --- | --- | --- |
+| `log_id` | INTEGER | Primary Key, Auto Increment |
+| `event_id` | TEXT | Agent 이벤트 ID. 값이 있을 때 Unique |
+| `agent_id` | TEXT | Agent 식별자 |
+| `timestamp` | TEXT | 이벤트 발생 시각, UTC ISO 8601 |
+| `received_at` | TEXT | 웹 서버 수신 시각, UTC ISO 8601 |
+| `host_ip` | TEXT | Host IP |
+| `hostname` | TEXT | Host 이름 |
+| `user_id` | TEXT | 사용자 식별자 |
+| `department` | TEXT | 부서 |
+| `file_name` | TEXT | 파일명 |
+| `file_path` | TEXT | 파일 경로 |
+| `process_name` | TEXT | 프로세스명 |
+| `leak_channel` | TEXT | 반출 채널 |
+| `detection_type` | TEXT | 탐지 방식 |
+| `ai_score` | REAL | AI 민감도 점수 |
+| `matched_keywords` | TEXT | 키워드 배열을 쉼표로 연결해 저장 |
+| `policy_id` | TEXT | 적용 정책 식별자 |
+| `action_taken` | TEXT | 최종 조치 결과 |
+| `decision_reason` | TEXT | 조치 판단 사유 |
+| `evidence_summary` | TEXT | 탐지 근거 요약 |
+| `latency_ms` | INTEGER | 분석·조치 지연 시간 |
+
+인덱스:
+
+- `idx_dlp_logs_event_id`: `event_id IS NOT NULL`인 행에 적용되는 Unique Index
+- `idx_dlp_logs_timestamp`: 최신 로그 조회를 위한 `timestamp DESC` Index
+
+`dlp_policies` 테이블:
+
+| 컬럼 | SQLite 타입 | 제약 및 설명 |
+| --- | --- | --- |
+| `policy_id` | INTEGER | Primary Key, Auto Increment |
+| `policy_name` | TEXT | 정책명 |
+| `description` | TEXT | 정책 설명 |
+| `ai_threshold` | REAL | 경고 기준 점수 |
+| `block_threshold` | REAL | 차단 기준 점수. `ai_threshold` 이상이어야 함 |
+| `is_active` | INTEGER | 활성 상태, `0` 또는 `1` |
+| `exception_extensions` | TEXT | 예외 확장자 배열을 쉼표로 연결해 저장 |
+
+### 6.5 주요 HTTP 상태 코드
+
+| 상태 코드 | 발생 조건 |
+| --- | --- |
+| `200` | 조회 성공, AI 분석 성공 또는 중복 로그 재전송 |
+| `201` | 신규 로그 또는 정책 저장 성공 |
+| `400` | 정책의 차단 임계치가 AI 임계치보다 낮음 |
+| `401` | `X-Agent-Token` 누락 또는 불일치 |
+| `404` | 존재하지 않는 로그 또는 프론트 파일 조회 |
+| `422` | 필수 필드 누락, 허용값 위반 또는 타입 오류 |
+| `502` | 외부 AI 서버 연결 실패 또는 잘못된 응답 |
+
+## 7. 샘플 로그 전송
+
+`.env`로 서버 토큰을 변경했다면 샘플 스크립트를 실행하는 터미널에도 같은 값을 불러옵니다.
+
+```bash
+set -a
+source .env
+set +a
+```
+
+일반 로그 전송:
+
+```bash
+python scripts/send_sample_log.py --scenario usb_copy
+```
+
+지원 시나리오:
+
+- `web_upload`
+- `usb_copy`
+- `email_attachment`
+- `print`
+- `messenger`
+
+중복 방지 확인:
+
+```bash
+python scripts/send_sample_log.py --scenario web_upload --event-id merge-test-001
+python scripts/send_sample_log.py --scenario web_upload --event-id merge-test-001
+```
+
+AI 분석 후 로그 저장:
+
+```bash
+python scripts/send_sample_log.py --scenario email_attachment --event-id ai-merge-test-001 --analyze-first
+```
+
+여러 건 전송:
+
+```bash
+python scripts/send_sample_log.py --scenario messenger --count 5
+```
+
+전체 옵션은 다음 명령으로 확인합니다.
+
+```bash
+python scripts/send_sample_log.py --help
+```
+
+### 7.1 현재 날짜 기준 데모 데이터 생성
+
+서버를 실행하기 전에도 SQLite DB에 최근 7일 데모 로그 12건을 직접 생성할 수 있습니다. 기존 로그는 삭제하거나 수정하지 않습니다.
+
+먼저 실제 DB를 변경하지 않고 생성 예정 데이터를 확인합니다.
+
+```bash
+python scripts/seed_demo_data.py --dry-run
+```
+
+기본 DB인 `backend/dlp_dashboard.db`에 적용합니다.
+
+```bash
+python scripts/seed_demo_data.py
+```
+
+생성 데이터는 차단 6건, 경고 3건, 허용 3건으로 구성되고 다섯 가지 유출 채널을 모두 포함합니다. `event_id`에 기준 날짜와 순번이 들어가므로 같은 날짜에 다시 실행하면 기존 12건을 건너뜁니다.
+
+특정 날짜를 기준으로 생성하려면 다음과 같이 실행합니다.
+
+```bash
+python scripts/seed_demo_data.py --base-date 2026-08-13
+```
+
+별도 DB에 생성하려면 `--db`를 사용합니다.
+
+```bash
+python scripts/seed_demo_data.py --db /tmp/dlp-demo.db
+```
+
+기준 날짜의 기본값은 현재 UTC 날짜입니다. 전체 옵션은 `python scripts/seed_demo_data.py --help`로 확인할 수 있습니다.
+
+## 8. 외부 AI 서버 연결
+
+외부 AI 서버 주소를 설정하면 웹 서버의 `/api/v1/analyze`가 분석 요청을 외부 서버로 전달합니다.
+
+```dotenv
+AI_SERVER_URL=http://127.0.0.1:9000
+AI_SERVER_TOKEN=replace-if-required
+AI_SERVER_TIMEOUT_SECONDS=5
+```
+
+`AI_SERVER_URL` 경로 처리 규칙은 다음과 같습니다.
+
+- `/analyze`로 끝나면 입력 주소를 그대로 사용
+- `/api/v1`로 끝나면 `/analyze` 추가
+- 그 외 주소에는 `/api/v1/analyze` 추가
+
+외부 AI 서버가 반환해야 하는 주요 필드는 다음과 같습니다.
+
+```json
+{
+  "event_id": "agent-event-001",
+  "decision": "review",
+  "confidence_score": 0.73,
+  "model_version": "team-ai-v1",
+  "latency_ms": 120,
+  "evidence_summary": "민감 패턴과 외부 전송 문맥이 함께 탐지됨"
+}
+```
+
+- `decision`은 `allow`, `review`, `block` 중 하나여야 합니다.
+- 점수 필드는 `confidence_score`, `ai_score`, `score`를 받을 수 있습니다.
+- `1` 초과 `100` 이하의 점수는 웹 서버에서 `0.0`~`1.0` 범위로 변환합니다.
+- 연결 실패, 잘못된 JSON 또는 잘못된 응답 형식은 HTTP `502`로 반환합니다.
+
+## 9. 자동화 테스트
+
+개발·테스트 의존성을 설치한 뒤 프로젝트의 `web` 디렉터리에서 실행합니다.
+
+```bash
+python -m pytest
+```
+
+간단한 결과만 확인하려면 다음과 같이 실행합니다.
+
+```bash
+python -m pytest -q
+```
+
+현재 자동화 테스트는 다음 항목을 검증합니다.
+
+- 테스트마다 `tmp_path` 아래 독립된 SQLite DB 생성
+- 테이블 생성과 기본 정책 시드
+- 대시보드·로그 화면과 헬스체크
+- Agent 토큰 인증 성공·실패
+- Mock AI 분석
+- 로그 저장, 상세 조회와 실제 SQLite 반영
+- 동일 `event_id` 재전송 중복 방지
+- 로그 입력값 검증과 조합 필터
+- 최근 기간 KPI, 차트 데이터와 날짜 경계
+- 정책 생성과 임계치 검증
+- 외부 AI 호출, 응답 정규화와 연결 실패 처리
+- 데모 seed 데이터 분포, 멱등성 및 대시보드 통계 반영
+
+fixture가 `backend.main.DB_PATH`를 pytest 임시 디렉터리로 교체하므로 테스트를 실행해도 `backend/dlp_dashboard.db`의 데이터는 변경되지 않습니다.
+
+특정 테스트 파일만 실행하려면 다음 명령을 사용합니다.
+
+```bash
+python -m pytest tests/test_api.py -q
+```
+
+## 10. 기본 수동 검증
+
+서버 실행 전 문법과 샘플 payload를 확인합니다.
+
+```bash
+python -m py_compile backend/main.py scripts/send_sample_log.py scripts/seed_demo_data.py
+python scripts/send_sample_log.py --scenario web_upload --dry-run
+```
+
+서버 실행 후 상태를 확인합니다.
+
+```bash
+python -c "from urllib.request import urlopen; print(urlopen('http://127.0.0.1:8000/health').read().decode())"
+```
+
+개발 의존성 설치 여부는 다음과 같이 확인할 수 있습니다.
+
+```bash
+python -c "from fastapi.testclient import TestClient; print('TestClient ready')"
+```
+
+## 11. 현재 제한사항
+
+- 실제 Host Agent와 AI 서버의 최종 E2E 통합은 아직 진행 전입니다.
+- 관리자 로그인과 역할 기반 접근 제어가 없습니다.
+- 정책 UI는 제거된 상태이며 정책 수정·삭제 API는 없습니다.
+- 데이터 저장소는 SQLite이며 운영 DB 전환은 진행 전입니다.
+- 로그 페이지네이션은 프론트에서 최대 200건을 받아 10건씩 표시하는 방식입니다.
+- 차트는 Chart.js CDN을 사용하므로 완전한 오프라인 환경에서는 표시되지 않을 수 있습니다.
+
+세부 구현 이력과 기존 검증 결과는 `webplan.md`를 참고합니다.

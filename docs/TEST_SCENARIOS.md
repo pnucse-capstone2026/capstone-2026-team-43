@@ -6,7 +6,7 @@
 착수보고서 1.3절의 3가지 반출 시나리오를 기준으로, 각 채널별로 block / review / allow가
 모두 나오는 예시를 준비했습니다.
 
-> 대시보드(`/api/v1/logs`) 로그 표시 관련 체크리스트는 이상호님 파트에서 별도로 정리될 예정입니다.
+> 대시보드(`/api/v1/logs`) 로그 연동 및 표시 검증은 아래 **웹 대시보드 연동 체크리스트 (이상호)** 절을 참고합니다.
 
 ---
 
@@ -47,7 +47,74 @@
 - [ ] AI 서버가 위 표의 기대 `decision`과 일치하는 응답을 반환한다
 - [ ] `confidence_score`, `model_version`, `latency_ms` 필드가 정상적으로 채워져 있다
 
+## 웹 대시보드 연동 체크리스트 (이상호)
+
+### 판정 및 채널 변환 기준
+
+통합 완료 시 Host Agent는 AI 서버의 요청·응답 값을 다음과 같이 대시보드 로그 필드로
+변환해 `POST /api/v1/logs`에 전송해야 합니다.
+
+| 연동 원본 값 | 대시보드 로그 값 |
+|---|---|
+| AI 요청 `event_id` | `event_id` |
+| `decision=block` | `action_taken=BLOCKED` |
+| `decision=review` | `action_taken=WARNED` |
+| `decision=allow` | `action_taken=ALLOWED` |
+| `confidence_score` | `ai_score` |
+| AI 요청 `matched_patterns`의 패턴 ID | `matched_keywords` |
+| AI 응답 `reason` | `evidence_summary` |
+| Host Agent의 최종 조치 사유 | `decision_reason` |
+| AI 응답 `latency_ms` | `latency_ms` |
+
+대시보드 API 기준 채널 변환안은 다음과 같습니다.
+
+| AI 요청 `channel` | 대시보드 `leak_channel` |
+|---|---|
+| `http` | `WEB_UPLOAD` |
+| `outlook` | `EMAIL_ATTACHMENT` |
+| `usb` | `USB_COPY` |
+| `clipboard` | 미확정 — 현재 로그 API 허용값에 `CLIPBOARD`가 없어 팀 합의 필요 |
+
+> 아래 항목은 현재 통합 완료 사실이 아니라 세 저장소 연동 시 충족해야 할 검증 기준입니다.
+> 현재 Host Agent의 `request_id` / `risk_score` / `action` 스키마와 대시보드 전송 경로는
+> 최신 AI·대시보드 API 계약에 맞게 정리해야 합니다.
+
+### 통합 전 API 계약 확인
+
+- [ ] Host Agent의 AI 요청 필드를 `event_id`, `channel`, `user_id`, `matched_patterns`, `snippet`, `metadata` 형식에 맞춘다
+- [ ] Host Agent의 AI 응답 파서를 `decision`, `confidence_score`, `model_version`, `latency_ms`, `reason` 형식에 맞춘다
+- [ ] 대시보드 전송 경로를 `/api/v1/events`가 아닌 `POST /api/v1/logs`로 맞춘다
+- [ ] 로컬 통합 테스트 시 대시보드 주소를 `http://127.0.0.1:8000` 또는 팀에서 정한 주소로 설정한다
+- [ ] 로그 전송 시 `X-Agent-Token`을 포함하고 대시보드의 로그 요청 스키마를 사용한다
+
+### 로그 수집 API 검증
+
+- [ ] AI 분석 요청과 로그 저장 요청에 동일한 `event_id`가 사용된다
+- [ ] Host Agent가 `X-Agent-Token` 헤더를 포함해 `POST /api/v1/logs`를 호출한다
+- [ ] 최초 전송 시 HTTP 201과 `duplicate=false`가 반환된다
+- [ ] `ai_score`, `action_taken`, `leak_channel`, `matched_keywords`, `evidence_summary`, `latency_ms`가 Agent 전송값과 동일하게 저장된다
+- [ ] 동일한 `event_id`를 재전송하면 HTTP 200과 `duplicate=true`가 반환되고 로그가 중복 생성되지 않는다
+
+### 로그 및 대시보드 화면 검증
+
+- [ ] `GET /api/v1/logs` 목록에서 신규 이벤트를 `event_id`로 확인할 수 있다
+- [ ] `GET /api/v1/logs/{log_id}` 상세 응답에 사용자·Host·파일·프로세스·정책·탐지 근거가 표시된다
+- [ ] `/logs` 화면에서 `BLOCKED` / `WARNED` / `ALLOWED` 상태, AI 점수, 매칭 키워드와 판단 사유가 정상 표시된다
+- [ ] 부서, 사용자, Agent, 조치 결과, 반출 채널, 날짜 및 검색어 필터가 신규 이벤트에 적용된다
+- [ ] `GET /api/v1/dashboard/summary?days=7`의 KPI와 타임라인에 신규 이벤트가 1건 반영된다
+- [ ] 차단 이벤트는 채널 분포·부서 통계·고위험 이벤트 목록에 반영된다
+
+### 예외 상황 검증
+
+- [ ] `X-Agent-Token`이 없거나 올바르지 않으면 로그 저장 요청이 HTTP 401로 거절된다
+- [ ] `ai_score` 범위 또는 `action_taken`, `leak_channel` 값이 유효하지 않으면 HTTP 422가 반환된다
+- [ ] 존재하지 않는 `log_id` 상세 조회는 HTTP 404를 반환한다
+- [ ] AI 서버 장애로 Host Agent가 Fail-Open 처리한 이벤트도 `ALLOWED`와 장애 사유를 포함해 로그로 남는지 확인한다
+
 ## 장애 상황 테스트 (Fail-Open 정책 확인용)
+
+> 현재 Host Agent는 AI 서버 타임아웃·오류 시 `block`을 반환하므로, 아래 Fail-Open 목표 정책과
+> 일치시키려면 Host Agent의 오류 처리 로직 변경이 필요합니다.
 
 - [ ] AI 서버가 응답하지 않을 때(타임아웃) Host Agent가 기본 허용(Fail-Open)으로 동작하는지 확인
 - [ ] AI 서버가 500 에러를 반환할 때도 Host Agent가 정상적으로 처리(차단 없이 통과)하는지 확인
@@ -56,8 +123,10 @@
 
 ## TODO (다른 파트와 합쳐서 보완 필요)
 
-- [ ] 대시보드(`/api/v1/logs`) 로그 기록 및 상세 화면 표시 체크리스트 — 이상호 파트
-- [ ] `decision=review`일 때 Host Agent의 실제 처리 정책 확정 — 김진우 파트, 팀 합의 필요
+- [x] 대시보드(`/api/v1/logs`) 로그 기록 및 상세 화면 표시 체크리스트 작성 — 이상호 파트
+- [ ] `channel=clipboard`를 대시보드 `leak_channel`에 저장하는 방식 확정 — 김진우·이상호 파트, 팀 합의 필요
+- [ ] `decision=review` 정책 최종 확정 — 현재 Host Agent는 허용 후 `review` 기록, 팀 합의 필요
+- [ ] AI `model_version`을 대시보드 로그에 저장할지 확정 — 박동화·이상호 파트, 팀 합의 필요
 
 > 참고: 위 텍스트들은 AI 서버 재학습 시 사용된 검증 데이터(train_dataset_v5.csv, hard_test_set_v1.csv)에서
 > 대표성 있는 케이스를 발췌한 것입니다. 실제 confidence_score 수치는 서버 버전에 따라 소수점 단위로

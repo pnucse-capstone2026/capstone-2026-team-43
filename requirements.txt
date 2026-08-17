@@ -11,7 +11,10 @@ aiosmtplib>=3.0.0      # SMTP 릴레이 클라이언트 (async)
 # ── network_hook: 첨부파일 텍스트 추출 ───────────────────────────────────────
 python-docx>=1.1.0     # .docx 파싱
 PyMuPDF>=1.24.0        # .pdf 파싱 (import fitz)
-openpyxl>=3.1.0        # .xlsx 파싱
+openpyxl>=3.1.0        # .xlsx / .xls 파싱
+python-pptx>=0.6.23   # .pptx 파싱
+striprtf>=0.0.26       # .rtf 파싱
+olefile>=0.47          # .hwp (OLE 형식) 파싱
 
 # ── network_hook: HTTPS MITM 프록시 (웹 메일 DLP) ────────────────────────────
 mitmproxy>=10.3.0      # HTTPS 인터셉트 + mitmproxy CA 자동 생성

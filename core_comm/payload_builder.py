@@ -57,8 +57,10 @@ _HOSTNAME = socket.gethostname()
 
 _SEVERITY_RANK = {"critical": 3, "high": 2, "medium": 1, "low": 0}
 
-# 너무 긴 텍스트(예: 대용량 파일 전체)는 전송·추론 한도 보호용으로 자를 수 있다.
-# 0 이하면 제한 없음.
+# AI 전송 시 매치 위치 앞뒤로 포함할 문자 수
+DEFAULT_CONTEXT_CHARS = 200
+
+# 0 이하면 제한 없음 (전체 텍스트 전송 — 하위 호환용)
 DEFAULT_MAX_TEXT_CHARS = 0
 
 
@@ -164,19 +166,55 @@ def _collect_matches(
     return matches
 
 
+def _extract_snippets(
+    text: str,
+    matches: list["PatternMatch"],
+    context: int,
+) -> str:
+    """매치 위치 앞뒤 context 자 범위만 잘라 합친다.
+
+    겹치는 구간은 병합하고 '...'로 구분해 반환한다.
+    매치가 없으면 text 앞부분 context*4 자를 반환한다.
+    """
+    if not matches:
+        return text[: context * 4]
+
+    # [start-context, end+context] 구간 수집
+    windows: list[tuple[int, int]] = []
+    for m in matches:
+        s = max(0, m.start - context)
+        e = min(len(text), m.end + context)
+        windows.append((s, e))
+
+    # 정렬 후 겹치는 구간 병합
+    windows.sort()
+    merged: list[list[int]] = []
+    for s, e in windows:
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+
+    parts = [text[s:e] for s, e in merged]
+    return "\n...\n".join(parts)
+
+
 class PayloadBuilder:
     """탐지 결과를 AI 서버 전송용 AnalysisPayload로 변환한다.
 
-    원문 전체를 마스킹 없이 담는다. matched_patterns는 1차 Rule 힌트이다.
+    정규식이 전체 텍스트를 검사하고, AI에는 매치 위치 앞뒤 context_chars 자만
+    스니펫으로 전송해 페이로드 크기를 최소화한다.
     """
 
     def __init__(
         self,
         max_text_chars: int = DEFAULT_MAX_TEXT_CHARS,
         max_per_pattern: int = 10,
+        context_chars: int = DEFAULT_CONTEXT_CHARS,
     ) -> None:
         self._max_text_chars  = max_text_chars
         self._max_per_pattern = max_per_pattern
+        self._context_chars   = context_chars
 
     def build(
         self,
@@ -185,13 +223,13 @@ class PayloadBuilder:
         channel: str,
         process_name: str,
     ) -> AnalysisPayload:
-        body = text
-        truncated = False
-        if self._max_text_chars and len(body) > self._max_text_chars:
-            body = body[: self._max_text_chars]
-            truncated = True
+        # 전체 텍스트에서 매치 위치 수집 (정규식은 이미 full text로 실행됨)
+        matches = _collect_matches(text, hits, self._max_per_pattern)
 
-        matches = _collect_matches(body, hits, self._max_per_pattern)
+        # AI 전송용: 매치 앞뒤 context만 추출 → 페이로드 경량화
+        snippet = _extract_snippets(text, matches, self._context_chars)
+        if self._max_text_chars and len(snippet) > self._max_text_chars:
+            snippet = snippet[: self._max_text_chars]
 
         severities = [h.get("severity", "medium") for h in hits]
         max_sev = max(severities, key=lambda s: _SEVERITY_RANK.get(s, 1), default="medium")
@@ -201,17 +239,17 @@ class PayloadBuilder:
             timestamp=datetime.now(timezone.utc).isoformat(),
             channel=channel,
             process=process_name,
-            text=body,
+            text=snippet,
             matched_patterns=matches,
             metadata={
-                "hostname":       _HOSTNAME,
-                "total_text_len": len(text),
-                "sent_text_len":  len(body),
-                "truncated":     truncated,
-                "total_hits":     len(hits),
-                "max_severity":   max_sev,
-                "pattern_ids":    list(dict.fromkeys(h.get("id") for h in hits)),
-                "text_hash":      hashlib.sha256(text.encode()).hexdigest()[:16],
+                "hostname":         _HOSTNAME,
+                "total_text_len":   len(text),
+                "snippet_text_len": len(snippet),
+                "context_chars":    self._context_chars,
+                "total_hits":       len(hits),
+                "max_severity":     max_sev,
+                "pattern_ids":      list(dict.fromkeys(h.get("id") for h in hits)),
+                "text_hash":        hashlib.sha256(text.encode()).hexdigest()[:16],
             },
         )
 

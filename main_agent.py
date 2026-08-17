@@ -78,6 +78,7 @@ def build_payload_builder(settings: dict[str, Any]) -> PayloadBuilder:
     return PayloadBuilder(
         max_text_chars=agent_cfg.get("ai_max_text_chars", 0),
         max_per_pattern=agent_cfg.get("ai_max_matches_per_pattern", 10),
+        context_chars=agent_cfg.get("ai_context_chars", 200),
     )
 
 
@@ -163,6 +164,7 @@ def build_clipboard_hook(
     event_logger: EventLogger,
     api_client: ApiClient,
     payload_builder: PayloadBuilder,
+    fi: FileInspector,
 ) -> ClipboardHook:
     policy_path = PROJECT_ROOT / "config" / "paste_policy.json"
     inspector   = PasteInspector(policy_path)
@@ -210,6 +212,7 @@ def build_clipboard_hook(
     return ClipboardHook(
         should_inspect=inspector.should_inspect,
         on_text_pasted=on_text_pasted,
+        file_inspector=fi,
     )
 
 
@@ -377,7 +380,7 @@ def _start_channels(
     if run_user:
         # 1. 클립보드
         try:
-            clipboard = build_clipboard_hook(rule_filter, event_logger, api_client, payload_builder)
+            clipboard = build_clipboard_hook(rule_filter, event_logger, api_client, payload_builder, fi)
             clipboard.start()
             active.append(clipboard)
             logger.info("[채널] clipboard  ON")

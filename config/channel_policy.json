@@ -46,6 +46,7 @@
     "_inspect_domains_comment": "국내에서 많이 쓰는 웹메일(+Office/Gmail). 이 호스트만 TLS 가로채기·전송(POST) 검사/로그.",
     "inspect_domains": [
       "mail.google.com",
+      "mail.googleapis.com",
       "gmail.googleapis.com",
       "mail.naver.com",
       "mail.navercorp.com",
@@ -77,6 +78,7 @@
       "/sync/u/0/i/bv",
       "/sync/u/0/i/bm",
       "/sync/u/0/i/bc",
+      "/sync/u/0/i/s",
       "jserror",
       "view=rcptc",
       "/log?",
@@ -85,6 +87,8 @@
       "/update2/",
       "domainreliability"
     ],
+
+    "_skip_comment": "/sync/u/0/i/s: draft sync — 발신자 이메일이 메타데이터에 항상 포함돼 오탐 발생 → skip. /_/upload? 경로는 skip 하지 않음 — 초기화 POST(메타데이터 110B)는 텍스트 없어 자동 skip, 실제 파일 바이너리 요청은 upload_id= 조건으로 바이패스 또는 content-type 기반 검사.",
 
     "_min_body_bytes_comment": "이 바이트 미만 본문은 검사 제외 (수신자 자동완성 등 초소형 요청 제외). 0=제한없음.",
     "min_body_bytes": 80

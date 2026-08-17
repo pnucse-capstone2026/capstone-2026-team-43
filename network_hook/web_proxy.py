@@ -16,6 +16,31 @@ import threading
 import urllib.parse
 from email import message_from_bytes
 from typing import Any, Callable, Optional
+from urllib.parse import urlparse, parse_qs
+
+# Content-Type → 확장자 매핑 (업로드 파일 타입 추론용)
+_CT_TO_EXT: dict[str, str] = {
+    "application/pdf":   ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":       ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/msword":          ".doc",
+    "application/zip":             ".zip",
+    "application/x-zip-compressed": ".zip",
+    "application/x-hwpml":         ".hwpx",
+    "application/haansofthwp":     ".hwp",
+    "text/plain":  ".txt",
+    "text/html":   ".html",
+    "text/csv":    ".csv",
+    "text/rtf":    ".rtf",
+    "application/rtf": ".rtf",
+}
+
+
+def _infer_ext_from_ct(content_type: str) -> str:
+    """Content-Type 헤더에서 파일 확장자 추론."""
+    ct = content_type.lower().split(";")[0].strip()
+    return _CT_TO_EXT.get(ct, "")
 
 logger = logging.getLogger(__name__)
 
@@ -82,20 +107,42 @@ class _DLPAddon:
         self._log_traffic       = log_traffic
         self._skip_patterns     = [s.lower() for s in (skip_path_patterns or [])]
         self._min_body_bytes    = min_body_bytes
-        # {body_hash: last_popup_time} — 재시도 팝업 중복 방지
+        # {host: last_popup_time} — 재시도 팝업 중복 방지
         self._popup_cache: dict[str, float] = {}
+        # 업로드 세션 추적: upload_id → {filename, content_type}
+        self._upload_meta: dict[str, dict] = {}
+        self._upload_lock = threading.Lock()
 
     # ── mitmproxy 훅 ─────────────────────────────────────────────────────────
 
     def request(self, flow) -> None:  # noqa: ANN001
         """요청이 서버로 전달되기 전 호출. block 결정 시 즉시 응답 설정."""
         try:
+            self._register_upload_init(flow)
+
+            # ── 업로드 관련 요청 전체 사전 로그 (도메인 파악용) ─────────────────
+            url = flow.request.pretty_url
+            url_lower = url.lower()
+            if self._is_target(flow.request.pretty_host.lower()):
+                if "upload_id=" in url_lower or "/_/upload" in url_lower:
+                    logger.info(
+                        "[WebProxy] Upload 요청 수신: method=%s  size=%d  url=%s",
+                        flow.request.method,
+                        len(flow.request.content or b""),
+                        url[:200],
+                    )
+
             self._handle(flow)
         except Exception:
             logger.exception("[WebProxy] request 처리 중 예외")
 
     def response(self, flow) -> None:  # noqa: ANN001
-        """메일 전송 요청에 대한 응답만 로그."""
+        """메일 전송 요청에 대한 응답만 로그. 업로드 세션 URI 캡처."""
+        try:
+            self._capture_upload_session(flow)
+        except Exception:
+            logger.debug("[WebProxy] 업로드 세션 캡처 실패", exc_info=True)
+
         if not self._log_traffic:
             return
         try:
@@ -114,6 +161,83 @@ class _DLPAddon:
         except Exception:
             logger.debug("[WebProxy] response 로그 실패", exc_info=True)
 
+    # ── 업로드 세션 추적 ──────────────────────────────────────────────────────
+
+    def _register_upload_init(self, flow) -> None:
+        """업로드 초기화 POST에서 파일 메타데이터를 추출해 임시 저장."""
+        req = flow.request
+        # Google resumable upload 초기화 식별: X-Goog-Upload-Protocol 헤더
+        if req.method != "POST":
+            return
+        if not self._is_target(req.pretty_host.lower()):
+            return
+        upload_protocol = req.headers.get("x-goog-upload-protocol", "")
+        if not upload_protocol and "/_/upload" not in req.pretty_url:
+            return
+
+        filename = (
+            req.headers.get("x-goog-upload-original-filename", "")
+            or req.headers.get("x-goog-upload-filename", "")
+            or req.headers.get("x-goog-upload-header-content-disposition", "")
+        )
+        content_type = (
+            req.headers.get("x-goog-upload-header-content-type", "")
+            or req.headers.get("x-goog-upload-content-type", "")
+        )
+        if filename or content_type:
+            # 세션 ID를 모르는 상태 → response hook에서 연결
+            flow.metadata["_upload_init"] = {
+                "filename":     filename,
+                "content_type": content_type,
+            }
+            logger.debug(
+                "[WebProxy] Upload init 감지: filename=%s ct=%s",
+                filename or "(미상)", content_type or "(미상)",
+            )
+
+    def _capture_upload_session(self, flow) -> None:
+        """업로드 초기화 응답에서 upload_id를 추출해 메타데이터와 연결."""
+        if "_upload_init" not in flow.metadata:
+            return
+        res = flow.response
+        if res is None:
+            return
+
+        upload_id = res.headers.get("x-guploader-uploadid", "")
+        if not upload_id:
+            location = res.headers.get("location", "")
+            if "upload_id=" in location:
+                upload_id = parse_qs(urlparse(location).query).get("upload_id", [""])[0]
+
+        meta = flow.metadata["_upload_init"]
+        location = res.headers.get("location", "")
+
+        # 응답 body 미리보기 — 실제 업로드 URL 파악용
+        resp_body_preview = ""
+        if res.content:
+            try:
+                resp_body_preview = res.content[:300].decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+
+        if upload_id:
+            with self._upload_lock:
+                self._upload_meta[upload_id] = meta
+            logger.info(
+                "[WebProxy] 업로드 세션 등록: id=%.24s  filename=%s  location=%s  resp_body=%s",
+                upload_id,
+                meta.get("filename") or "(미상)",
+                location[:120] or "(없음)",
+                resp_body_preview[:120] or "(없음)",
+            )
+        else:
+            logger.info(
+                "[WebProxy] Upload init 응답 (upload_id 미확인): status=%s  location=%s  resp_body=%s",
+                res.status_code,
+                location[:160] or "(없음)",
+                resp_body_preview[:120] or "(없음)",
+            )
+
     # ── 내부 로직 ─────────────────────────────────────────────────────────────
 
     def _is_mail_send(self, flow) -> bool:
@@ -121,14 +245,22 @@ class _DLPAddon:
 
         skip_path_patterns 에 걸리는 경로(sync·jserror·자동완성 등)는 제외.
         min_body_bytes 미만 본문도 제외.
+        실제 파일 업로드(PUT /?...upload_id=...)는 skip_path_patterns 와 무관하게 항상 포함.
         """
         if flow.request.method not in ("POST", "PUT", "PATCH"):
             return False
         if not self._is_target(flow.request.pretty_host.lower()):
             return False
 
-        # 경로·쿼리 기반 제외
         url_lower = flow.request.pretty_url.lower()
+
+        # 실제 파일 업로드 요청 — skip_path_patterns·min_body_bytes 우회
+        # (작은 파일 1 byte라도 검사 대상)
+        is_upload = "upload_id=" in url_lower or "/_/upload" in url_lower
+        if is_upload:
+            return len(flow.request.content or b"") >= 1
+
+        # 경로·쿼리 기반 제외
         for pat in self._skip_patterns:
             if pat in url_lower:
                 return False
@@ -171,6 +303,15 @@ class _DLPAddon:
         # 메일 전송 패킷만 처리 (일반 트래픽/GET 로깅 없음)
         if not self._is_mail_send(flow):
             return
+
+        # 실제 파일 업로드 PUT 감지 — 명시적 로그
+        url_lower = flow.request.pretty_url.lower()
+        if flow.request.method == "PUT" and "upload_id=" in url_lower:
+            logger.info(
+                "[WebProxy] 파일 업로드 PUT 수신: size=%d  url=%s",
+                len(flow.request.content or b""),
+                flow.request.pretty_url[:180],
+            )
 
         if self._log_traffic:
             self._log_send(flow)
@@ -287,14 +428,91 @@ class _DLPAddon:
         if not body:
             return ""
 
+        # 실제 파일 업로드 (upload_id 포함 또는 /_/upload 경로) — 바이너리를 FileInspector로 검사
+        url = flow.request.pretty_url
+        url_lower = url.lower()
+        if "upload_id=" in url_lower or "/_/upload" in url_lower:
+            result = self._extract_upload_binary(flow, body, ct)
+            if result:
+                return result
+            # 추출 실패 시 일반 경로로 폴백하지 않음 (메타데이터일 가능성 높음)
+            return ""
+
         if "application/json" in ct:
             return self._from_json(body)
-        if "multipart/form-data" in ct:
+        if "multipart/" in ct:          # form-data, related, mixed 모두 처리
             return self._from_multipart(body, ct)
         if "application/x-www-form-urlencoded" in ct:
             return self._from_urlencoded(body)
+        # application/octet-stream 등 — FileInspector로 시도
+        if self._fi and ("octet-stream" in ct or not ct):
+            fname = url.rstrip("/").rsplit("/", 1)[-1].split("?")[0] or "upload.bin"
+            extracted = self._fi.extract_from_bytes(body, fname)
+            if extracted:
+                return extracted
         # 기타 (text/plain 등)
         return body.decode("utf-8", errors="ignore")
+
+    def _extract_upload_binary(self, flow, body: bytes, ct: str) -> str:
+        """첨부파일 업로드 본문에서 텍스트 추출.
+
+        POST/PUT /_/upload 또는 upload_id 포함 URL 처리.
+        우선순위: 세션 메타데이터 파일명 > Content-Disposition > Content-Type 추론 > UTF-8 디코드
+        """
+        url = flow.request.pretty_url
+
+        # 업로드 세션 메타데이터에서 파일명·CT 조회
+        upload_id = parse_qs(urlparse(url).query).get("upload_id", [""])[0]
+        with self._upload_lock:
+            meta = self._upload_meta.get(upload_id, {})
+
+        filename  = meta.get("filename", "")
+        stored_ct = meta.get("content_type", "") or ct
+
+        # Content-Disposition 헤더에서 파일명 보완
+        if not filename:
+            cd = flow.request.headers.get("content-disposition", "")
+            m  = re.search(r'filename[*]?=["\']?([^"\';\r\n]+)', cd)
+            if m:
+                filename = m.group(1).strip()
+
+        # Content-Type에서 확장자 추론 (알려진 파일 형식일 때)
+        effective_ct = stored_ct.split(";")[0].strip()
+        if not filename or "." not in filename:
+            ext      = _infer_ext_from_ct(effective_ct)
+            filename = f"upload{ext}" if ext else "upload.bin"
+
+        logger.info(
+            "[WebProxy] 첨부파일 업로드 검사: method=%s filename=%s size=%d ct=%s",
+            flow.request.method, filename, len(body), effective_ct,
+        )
+
+        # FileInspector로 텍스트 추출
+        if self._fi:
+            try:
+                text = self._fi.extract_from_bytes(body, filename)
+                if text and text.strip():
+                    return text
+            except Exception as exc:
+                logger.debug("[WebProxy] 업로드 FileInspector 실패: %s", exc)
+
+        # text/* Content-Type이면 UTF-8로 직접 디코드
+        if effective_ct.startswith("text/"):
+            try:
+                return body.decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+
+        # 순수 UTF-8 텍스트 fallback (binary 판별)
+        try:
+            decoded = body.decode("utf-8", errors="strict")
+            printable_ratio = sum(1 for c in decoded if c.isprintable() or c in "\n\r\t") / max(len(decoded), 1)
+            if printable_ratio > 0.85:  # 85% 이상 출력 가능 문자 → 텍스트 파일
+                return decoded
+        except UnicodeDecodeError:
+            pass
+
+        return ""
 
     def _from_json(self, body: bytes) -> str:
         """JSON 객체에서 모든 문자열 값을 재귀 수집."""

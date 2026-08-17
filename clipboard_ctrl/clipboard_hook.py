@@ -16,10 +16,12 @@ Flow
 import ctypes
 import ctypes.wintypes
 import logging
+import pathlib
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import win32api
+import win32clipboard
 import win32con
 import win32gui
 import win32process
@@ -100,6 +102,7 @@ class ClipboardHook:
         self,
         should_inspect: Callable[[str], bool],
         on_text_pasted: Callable[[str, str], bool],
+        file_inspector: Optional[Any] = None,
     ) -> None:
         """
         Parameters
@@ -112,9 +115,12 @@ class ClipboardHook:
             Receives (normalized_text, process_name).
             Return True  → block the paste.
             Return False → allow the paste.
+        file_inspector:
+            FileInspector 인스턴스. 있으면 CF_HDROP(파일 복사) 시 파일 내용을 추출해 검사.
         """
         self._should_inspect = should_inspect
         self._on_text_pasted = on_text_pasted
+        self._file_inspector = file_inspector
 
         self._thread: Optional[threading.Thread] = None
         self._thread_id: Optional[int] = None
@@ -162,6 +168,34 @@ class ClipboardHook:
         except Exception:
             return None
 
+    def _extract_file_texts(self) -> Optional[str]:
+        """클립보드에 CF_HDROP(파일 목록)이 있으면 각 파일 내용을 추출해 반환."""
+        if not self._file_inspector:
+            return None
+        try:
+            win32clipboard.OpenClipboard()
+            try:
+                if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP):
+                    return None
+                file_paths = win32clipboard.GetClipboardData(win32con.CF_HDROP)
+            finally:
+                win32clipboard.CloseClipboard()
+
+            parts: list[str] = []
+            for fp in file_paths:
+                try:
+                    text = self._file_inspector.extract_from_path(pathlib.Path(fp))
+                    if text and text.strip():
+                        fname = pathlib.Path(fp).name
+                        parts.append(f"[파일: {fname}]\n{text}")
+                        logger.info("CF_HDROP 파일 내용 추출: %s (%d chars)", fname, len(text))
+                except Exception as exc:
+                    logger.debug("CF_HDROP 파일 추출 실패 %s: %s", fp, exc)
+            return "\n\n".join(parts) if parts else None
+        except Exception as exc:
+            logger.debug("CF_HDROP 처리 실패: %s", exc)
+            return None
+
     def _handle_paste(self) -> bool:
         """Return True to block the paste, False to allow it."""
         process_name = self._get_foreground_process_name()
@@ -171,11 +205,15 @@ class ClipboardHook:
         if not self._should_inspect(process_name):
             return False
 
+        # 1) 텍스트/HTML 클립보드
         text = TextExtractor.extract()
-        if not text:
-            return False
+        normalized = TextExtractor.normalize(text) if text else ""
 
-        normalized = TextExtractor.normalize(text)
+        # 2) 파일 클립보드(CF_HDROP) — 파일 내용 추출
+        file_text = self._extract_file_texts()
+        if file_text:
+            normalized = (normalized + "\n\n" + file_text).strip() if normalized else file_text
+
         if not normalized:
             return False
 

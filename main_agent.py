@@ -186,18 +186,20 @@ def build_clipboard_hook(
     inspector   = PasteInspector(policy_path)
     logger      = logging.getLogger(__name__)
 
+    # hook_ref: ClipboardHook 객체를 생성 후 바인딩 (순환 참조 없이 콜백에 전달)
+    hook_ref: list[Any] = [None]
+
     def on_text_pasted(text: str, process_name: str) -> bool:
         """True 반환 시 붙여넣기 차단.
 
-        정규식 탐지(로컬)에서 히트가 나면 즉시 True를 반환해 붙여넣기를 막는다.
-        AI 분석은 백그라운드 스레드에서 수행해 Windows LowLevelHooksTimeout(기본 300ms)
-        초과로 훅이 무시되는 문제를 방지한다.
+        정규식 히트 즉시 차단 → AI 비동기 분석 →
+          block/review : 팝업 + 로그 (차단 유지)
+          allow        : 클립보드 복원 후 Ctrl+V 재발행 (오탐 복구)
         """
         hits = rule_filter.match(text)
         if not hits:
             return False
 
-        # ── 정규식 히트 → 즉시 차단, AI는 비동기 처리 ──────────────────────
         def _ai_then_notify() -> None:
             payload = payload_builder.build(text, hits, "clipboard", process_name)
             result  = api_client.analyze(payload)
@@ -235,19 +237,24 @@ def build_clipboard_hook(
                     text=text,
                     extra=_extra,
                 )
-                logger.warning("[clipboard] review — 붙여넣기는 차단됨")
+                logger.warning("[clipboard] review — 붙여넣기 차단 유지")
             else:
-                # AI가 허용 판정 — 정규식 오탐. 이미 차단된 붙여넣기를 로그만 남긴다.
-                logger.info("[clipboard] AI allow — 정규식 오탐으로 간주, 로그 생략")
+                # AI 허용 → 정규식 오탐. 클립보드 복원 후 붙여넣기 재발행.
+                logger.info("[clipboard] AI allow — 오탐 복구: 붙여넣기 재발행")
+                hook = hook_ref[0]
+                if hook is not None:
+                    hook.release_paste(text)
 
         threading.Thread(target=_ai_then_notify, daemon=True, name="ClipboardAI").start()
         return True  # 정규식 히트 즉시 차단
 
-    return ClipboardHook(
+    hook = ClipboardHook(
         should_inspect=inspector.should_inspect,
         on_text_pasted=on_text_pasted,
         file_inspector=fi,
     )
+    hook_ref[0] = hook
+    return hook
 
 
 def build_outlook_hook(

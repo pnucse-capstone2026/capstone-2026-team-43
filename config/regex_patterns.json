@@ -111,6 +111,13 @@
       "name": "DB 연결문자열",
       "regex": "(?i)(?:mongodb|postgresql|mysql|mssql|redis)://[^\\s\"']{8,}",
       "severity": "critical"
+    },
+    {
+      "id": "dlp_test_allow",
+      "name": "[테스트] AI allow 복원 마커",
+      "_comment": "정규식에는 걸리지만 AI 모델은 allow 판정해야 하는 테스트용 마커. 실 배포 시 제거.",
+      "regex": "\\[DLP-ALLOW-TEST\\]",
+      "severity": "low"
     }
   ]
 }

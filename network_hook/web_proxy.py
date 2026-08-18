@@ -349,9 +349,18 @@ class _DLPAddon:
         result  = self._api.analyze(payload)
 
         logger.info(
-            "[WebProxy] AI 판단: action=%s risk=%.0f url=%s",
-            result.action, result.risk_score, flow.request.pretty_url,
+            "[WebProxy] AI 판단: action=%s confidence=%.2f url=%s",
+            result.action, result.confidence_score, flow.request.pretty_url,
         )
+
+        _extra = {
+            "event_id":       payload.request_id,
+            "url":            flow.request.pretty_url,
+            "ai_score":       result.confidence_score,
+            "reason":         result.reason,
+            "latency_ms":     int(result.latency_ms),
+            "detection_type": "RULE_BASED" if getattr(self._api, "is_mock", True) else "HYBRID",
+        }
 
         if result.should_block:
             self._event_logger.log(
@@ -360,11 +369,7 @@ class _DLPAddon:
                 process_name=process_name,
                 hits=hits,
                 text=text,
-                extra={
-                    "url":        flow.request.pretty_url,
-                    "risk_score": result.risk_score,
-                    "reason":     result.reason,
-                },
+                extra=_extra,
             )
             # 같은 호스트 60초 내 팝업 1회만 (재시도/동시다발 차단 팝업 폭탄 방지)
             if self._on_blocked:
@@ -401,11 +406,7 @@ class _DLPAddon:
                 process_name=process_name,
                 hits=hits,
                 text=text,
-                extra={
-                    "url":        flow.request.pretty_url,
-                    "risk_score": result.risk_score,
-                    "reason":     result.reason,
-                },
+                extra=_extra,
             )
             logger.warning("[WebProxy] review 기록 — %s", flow.request.pretty_url)
         # allow → 그대로 통과

@@ -7,15 +7,16 @@ Mock 모드 (ai_base_url = "" 또는 미설정 시)
   severity 기반 규칙으로 즉시 AnalysisResult 반환
   실제 AI 서버 없이도 파이프라인 전체를 테스트할 수 있다.
 
-Mock 판단 기준
---------------
-  critical 패턴 있음 → block  (risk_score 95)
-  high 패턴만 있음   → block  (risk_score 75)
-  medium만 있음      → review (risk_score 45)  ← AI가 최종 판단할 영역
+Mock 판단 기준 (AI 서버 confidence_score 스케일 0-1 기준)
+----------------------------------------------------------
+  critical 패턴 있음 → block  (confidence 0.95)
+  high 패턴만 있음   → block  (confidence 0.75)
+  medium만 있음      → review (confidence 0.40)
+  low만 있음         → allow  (confidence 0.10)
 """
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import requests
 
@@ -27,33 +28,44 @@ _SEVERITY_RANK = {"critical": 3, "high": 2, "medium": 1, "low": 0}
 
 
 def _mock_result(payload: AnalysisPayload) -> AnalysisResult:
-    """AI 서버 없이 severity만으로 즉시 판단하는 mock."""
+    """AI 서버 없이 severity만으로 즉시 판단하는 mock.
+
+    confidence_score를 0-1 스케일로 반환해 실제 AI 서버와 동일한 AnalysisResult 구조를 유지한다.
+    """
     max_sev = payload.metadata.get("max_severity", "medium")
     rank = _SEVERITY_RANK.get(max_sev, 1)
 
     if rank >= 3:          # critical
         return AnalysisResult(
             request_id=payload.request_id,
-            risk_score=95.0,
+            confidence_score=0.95,
             action="block",
-            is_sensitive=True,
             reason=f"[mock] critical 패턴 탐지 ({payload.metadata.get('pattern_ids')})",
+            model_version="mock-severity-v1",
         )
     elif rank == 2:        # high
         return AnalysisResult(
             request_id=payload.request_id,
-            risk_score=75.0,
+            confidence_score=0.75,
             action="block",
-            is_sensitive=True,
             reason=f"[mock] high 패턴 탐지 ({payload.metadata.get('pattern_ids')})",
+            model_version="mock-severity-v1",
         )
-    else:                  # medium / low
+    elif rank == 1:        # medium
         return AnalysisResult(
             request_id=payload.request_id,
-            risk_score=45.0,
+            confidence_score=0.40,
             action="review",
-            is_sensitive=False,
             reason=f"[mock] medium 패턴 탐지 — AI 검토 필요 ({payload.metadata.get('pattern_ids')})",
+            model_version="mock-severity-v1",
+        )
+    else:                  # low
+        return AnalysisResult(
+            request_id=payload.request_id,
+            confidence_score=0.10,
+            action="allow",
+            reason=f"[mock] low 패턴 — 허용 ({payload.metadata.get('pattern_ids')})",
+            model_version="mock-severity-v1",
         )
 
 
@@ -83,8 +95,8 @@ class ApiClient:
         if self._mock:
             result = _mock_result(payload)
             logger.debug(
-                "Mock 분석 결과: action=%s risk=%.0f reason=%s",
-                result.action, result.risk_score, result.reason,
+                "Mock 분석 결과: action=%s confidence=%.2f reason=%s",
+                result.action, result.confidence_score, result.reason,
             )
             return result
 
@@ -92,12 +104,12 @@ class ApiClient:
 
     def _call_server(self, payload: AnalysisPayload) -> AnalysisResult:
         url = f"{self._base_url}/api/v1/analyze"
-        logger.debug("AI 서버 요청 → %s (request_id=%s)", url, payload.request_id)
+        logger.debug("AI 서버 요청 → %s (event_id=%s)", url, payload.request_id)
 
         try:
             resp = requests.post(
                 url,
-                json=payload.to_dict(),
+                json=payload.to_dict(),   # AgentRequest 포맷
                 timeout=self._timeout,
             )
             resp.raise_for_status()
@@ -106,17 +118,15 @@ class ApiClient:
             logger.error("AI 서버 타임아웃 (%.1fs) — 보수적으로 block 처리", self._timeout)
             return AnalysisResult(
                 request_id=payload.request_id,
-                risk_score=100.0,
+                confidence_score=1.0,
                 action="block",
-                is_sensitive=True,
                 reason="AI 서버 타임아웃 — 보수적 차단",
             )
         except Exception as exc:
             logger.error("AI 서버 오류: %s — block 처리", exc)
             return AnalysisResult(
                 request_id=payload.request_id,
-                risk_score=100.0,
+                confidence_score=1.0,
                 action="block",
-                is_sensitive=True,
                 reason=f"AI 서버 오류: {exc}",
             )

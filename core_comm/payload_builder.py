@@ -2,54 +2,42 @@
 
 설계 원칙
 ---------
-1. 정규식 1차 hit가 난 원문 전체를 AI에 전달 → 문맥 기반 기밀 판별에 필요
+1. 정규식 1차 hit가 난 전체 텍스트에서 매치 앞뒤 context_chars 자만 스니펫으로 추출해 AI에 전달
 2. 마스킹하지 않음 — 마스킹은 문맥 분석 성능을 해침
-3. matched_patterns로 1차 게이트 힌트만 부가 제공 (AI가 어디에 주목할지 참고)
+3. matched_patterns로 1차 게이트 힌트 제공 (AI가 어디에 주목할지 참고)
 
-AI Request 포맷
---------------
+AI 서버 요청 포맷 (AgentRequest)
+---------------------------------
 {
-  "request_id": "<uuid>",
-  "timestamp": "<ISO 8601 UTC>",
-  "channel": "clipboard|outlook|smtp|http|usb|network_share",
-  "process": "slack.exe",
-  "text": "검사 대상 원문 전체 (마스킹 없음)",
-  "matched_patterns": [
-    {
-      "pattern_id": "rrn",
-      "pattern_name": "주민등록번호",
-      "severity": "critical",
-      "match": "900101-1234567",
-      "start": 10,
-      "end": 24
-    }
-  ],
+  "event_id":         "<uuid>",
+  "channel":          "clipboard|outlook|smtp|web_mail|file_guard|http",
+  "user_id":          "<Windows USERNAME>",
+  "matched_patterns": ["rrn", "credit_card"],   // 패턴 ID 목록 (문자열)
+  "snippet":          "검사 대상 텍스트 스니펫",
   "metadata": {
-    "hostname": "PC-001",
-    "total_text_len": 1234,
-    "total_hits": 1,
-    "max_severity": "critical",
-    "pattern_ids": ["rrn"],
-    "text_hash": "a1b2c3d4e5f67890"
+    "app":           "chrome.exe",
+    "severity_hint": "critical"
   }
 }
 
-AI Response 포맷 (기대값)
--------------------------
+AI 서버 응답 포맷 (AgentResponse)
+----------------------------------
 {
-  "request_id": "<uuid>",
-  "risk_score": 85,          // 0–100
-  "action": "block",         // "allow" | "block" | "review"
-  "is_sensitive": true,
-  "reason": "..."
+  "event_id":         "<uuid>",
+  "decision":         "allow|review|block",
+  "confidence_score": 0.87,     // 0.0–1.0
+  "model_version":    "koelectra-dlp-v6",
+  "latency_ms":       23.4,
+  "reason":           "주민등록번호 탐지됨"
 }
 """
 
 import hashlib
+import os
 import re
 import socket
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -77,43 +65,52 @@ class PatternMatch:
 
 @dataclass
 class AnalysisPayload:
-    request_id: str
+    """내부 페이로드. to_dict()로 AI 서버 AgentRequest 포맷을 생성한다."""
+    request_id: str           # AgentRequest.event_id 로 매핑
     timestamp: str
     channel: str
-    process: str
-    text: str
+    process: str              # AgentRequest.metadata.app 으로 매핑
+    user_id: str              # AgentRequest.user_id
+    text: str                 # AgentRequest.snippet 으로 매핑
     matched_patterns: list[PatternMatch]
     metadata: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
+        """AI 서버 AgentRequest 포맷으로 직렬화한다."""
+        max_sev = self.metadata.get("max_severity", "medium")
+        # matched_patterns는 패턴 ID 문자열 리스트 (중복 제거)
+        pattern_ids = list(dict.fromkeys(m.pattern_id for m in self.matched_patterns))
         return {
-            "request_id": self.request_id,
-            "timestamp": self.timestamp,
-            "channel": self.channel,
-            "process": self.process,
-            "text": self.text,
-            "matched_patterns": [
-                {
-                    "pattern_id": m.pattern_id,
-                    "pattern_name": m.pattern_name,
-                    "severity": m.severity,
-                    "match": m.match,
-                    "start": m.start,
-                    "end": m.end,
-                }
-                for m in self.matched_patterns
-            ],
-            "metadata": self.metadata,
+            "event_id":         self.request_id,
+            "channel":          self.channel,
+            "user_id":          self.user_id,
+            "matched_patterns": pattern_ids,
+            "snippet":          self.text,
+            "metadata": {
+                "app":           self.process,
+                "severity_hint": max_sev,
+            },
         }
 
 
 @dataclass
 class AnalysisResult:
+    """AI 서버 AgentResponse 파싱 결과."""
     request_id: str
-    risk_score: float           # 0–100
-    action: str                 # "allow" | "block" | "review"
-    is_sensitive: bool
+    confidence_score: float    # 0.0–1.0 (AI 서버 네이티브 스케일)
+    action: str                # "allow" | "block" | "review"
     reason: str = ""
+    model_version: str = ""
+    latency_ms: float = 0.0
+
+    @property
+    def risk_score(self) -> float:
+        """0–100 스케일 (내부 로직 호환용)."""
+        return round(self.confidence_score * 100, 1)
+
+    @property
+    def is_sensitive(self) -> bool:
+        return self.action in ("block", "review")
 
     @property
     def should_block(self) -> bool:
@@ -168,7 +165,7 @@ def _collect_matches(
 
 def _extract_snippets(
     text: str,
-    matches: list["PatternMatch"],
+    matches: list[PatternMatch],
     context: int,
 ) -> str:
     """매치 위치 앞뒤 context 자 범위만 잘라 합친다.
@@ -179,14 +176,12 @@ def _extract_snippets(
     if not matches:
         return text[: context * 4]
 
-    # [start-context, end+context] 구간 수집
     windows: list[tuple[int, int]] = []
     for m in matches:
         s = max(0, m.start - context)
         e = min(len(text), m.end + context)
         windows.append((s, e))
 
-    # 정렬 후 겹치는 구간 병합
     windows.sort()
     merged: list[list[int]] = []
     for s, e in windows:
@@ -211,10 +206,12 @@ class PayloadBuilder:
         max_text_chars: int = DEFAULT_MAX_TEXT_CHARS,
         max_per_pattern: int = 10,
         context_chars: int = DEFAULT_CONTEXT_CHARS,
+        user_id: str = "",
     ) -> None:
         self._max_text_chars  = max_text_chars
         self._max_per_pattern = max_per_pattern
         self._context_chars   = context_chars
+        self._user_id         = user_id or os.environ.get("USERNAME", "unknown")
 
     def build(
         self,
@@ -223,10 +220,8 @@ class PayloadBuilder:
         channel: str,
         process_name: str,
     ) -> AnalysisPayload:
-        # 전체 텍스트에서 매치 위치 수집 (정규식은 이미 full text로 실행됨)
         matches = _collect_matches(text, hits, self._max_per_pattern)
 
-        # AI 전송용: 매치 앞뒤 context만 추출 → 페이로드 경량화
         snippet = _extract_snippets(text, matches, self._context_chars)
         if self._max_text_chars and len(snippet) > self._max_text_chars:
             snippet = snippet[: self._max_text_chars]
@@ -239,6 +234,7 @@ class PayloadBuilder:
             timestamp=datetime.now(timezone.utc).isoformat(),
             channel=channel,
             process=process_name,
+            user_id=self._user_id,
             text=snippet,
             matched_patterns=matches,
             metadata={
@@ -255,18 +251,23 @@ class PayloadBuilder:
 
 
 class ResponseParser:
-    """AI 서버 응답 dict를 AnalysisResult로 변환한다."""
+    """AI 서버 AgentResponse dict를 AnalysisResult로 변환한다."""
 
     @staticmethod
     def parse(raw: dict[str, Any], request_id: str = "") -> AnalysisResult:
-        action = raw.get("action", "block").lower()
+        # AgentResponse: decision + confidence_score (0-1)
+        action = raw.get("decision", "block").lower()
         if action not in {"allow", "block", "review"}:
             action = "block"
 
+        confidence = float(raw.get("confidence_score", 1.0))
+        confidence = max(0.0, min(1.0, confidence))
+
         return AnalysisResult(
-            request_id=raw.get("request_id", request_id),
-            risk_score=float(raw.get("risk_score", 100)),
+            request_id=raw.get("event_id", request_id),
+            confidence_score=confidence,
             action=action,
-            is_sensitive=bool(raw.get("is_sensitive", True)),
             reason=raw.get("reason", ""),
+            model_version=raw.get("model_version", ""),
+            latency_ms=float(raw.get("latency_ms", 0)),
         )

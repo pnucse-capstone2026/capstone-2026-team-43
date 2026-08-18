@@ -128,6 +128,9 @@ class ClipboardHook:
         self._hook_id: Optional[int] = None
         self._hook_proc_ref: Optional[LowLevelKeyboardProc] = None  # prevent GC
 
+        # AI allow 판정 시 클립보드 복원 후 재붙여넣기할 때 훅이 스스로를 무시하는 플래그
+        self._skip_next_paste: bool = False
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -196,8 +199,64 @@ class ClipboardHook:
             logger.debug("CF_HDROP 처리 실패: %s", exc)
             return None
 
+    def release_paste(self, original_text: str) -> None:
+        """AI가 허용 판정을 내렸을 때 클립보드를 복원하고 Ctrl+V를 재발행한다.
+
+        백그라운드 스레드에서 호출되어야 한다.
+        CF_HDROP(파일) 붙여넣기는 텍스트로 대체 복원한다.
+        """
+        import time
+        time.sleep(0.08)  # 훅 처리 안정화 대기
+
+        # 클립보드에 원문 복원
+        try:
+            win32clipboard.OpenClipboard()
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardText(original_text, win32con.CF_UNICODETEXT)
+            win32clipboard.CloseClipboard()
+        except Exception as exc:
+            logger.warning("클립보드 복원 실패 — 붙여넣기 재발행 취소: %s", exc)
+            return
+
+        # 다음 Ctrl+V는 훅에서 무시 (무한 루프 방지)
+        self._skip_next_paste = True
+
+        # SendInput으로 Ctrl+V 시뮬레이션
+        KEYEVENTF_KEYUP = 0x0002
+
+        class _KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk",         ctypes.c_ushort),
+                ("wScan",       ctypes.c_ushort),
+                ("dwFlags",     ctypes.c_ulong),
+                ("time",        ctypes.c_ulong),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
+        class _INPUT(ctypes.Structure):
+            _fields_ = [
+                ("type", ctypes.c_ulong),
+                ("ki",   _KEYBDINPUT),
+                ("_pad", ctypes.c_ubyte * 8),
+            ]
+
+        seq = (
+            _INPUT(type=1, ki=_KEYBDINPUT(wVk=VK_CONTROL)),
+            _INPUT(type=1, ki=_KEYBDINPUT(wVk=VK_V)),
+            _INPUT(type=1, ki=_KEYBDINPUT(wVk=VK_V,       dwFlags=KEYEVENTF_KEYUP)),
+            _INPUT(type=1, ki=_KEYBDINPUT(wVk=VK_CONTROL, dwFlags=KEYEVENTF_KEYUP)),
+        )
+        arr = (_INPUT * len(seq))(*seq)
+        ctypes.windll.user32.SendInput(len(seq), arr, ctypes.sizeof(_INPUT))
+        logger.info("AI allow — 붙여넣기 복원 재발행 완료")
+
     def _handle_paste(self) -> bool:
         """Return True to block the paste, False to allow it."""
+        # AI allow 판정 후 재발행된 Ctrl+V — 훅 무시
+        if self._skip_next_paste:
+            self._skip_next_paste = False
+            return False
+
         process_name = self._get_foreground_process_name()
         if not process_name:
             return False

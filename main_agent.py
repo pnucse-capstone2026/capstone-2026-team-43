@@ -19,6 +19,7 @@ AI 서버 설정 (settings.yaml)
 
 import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -74,31 +75,39 @@ def build_api_client(settings: dict[str, Any]) -> ApiClient:
 
 def build_payload_builder(settings: dict[str, Any]) -> PayloadBuilder:
     agent_cfg = settings.get("agent", {})
-    # max_text_chars: 0 = 원문 전체 무제한 전송. 대용량 파일 보호 시 상한 설정.
+    user_id   = agent_cfg.get("user_id") or os.environ.get("USERNAME", "")
     return PayloadBuilder(
         max_text_chars=agent_cfg.get("ai_max_text_chars", 0),
         max_per_pattern=agent_cfg.get("ai_max_matches_per_pattern", 10),
         context_chars=agent_cfg.get("ai_context_chars", 200),
+        user_id=user_id,
     )
 
 
 def build_event_logger(settings: dict[str, Any]) -> EventLogger:
-    log_cfg = settings.get("logging", {})
+    log_cfg    = settings.get("logging", {})
     server_cfg = settings.get("server", {})
+    agent_cfg  = settings.get("agent", {})
 
     store = LocalEventStore(
         log_dir=PROJECT_ROOT / log_cfg.get("log_dir", "logs"),
         max_bytes=log_cfg.get("max_bytes", 10 * 1024 * 1024),
         text_preview_len=log_cfg.get("text_preview_len", 120),
     )
-    dashboard_url = (
-        server_cfg.get("dashboard_url") if log_cfg.get("send_immediately") else None
-    )
+    send_now = bool(log_cfg.get("send_immediately", False))
+    dashboard_url = server_cfg.get("dashboard_url") if send_now else None
+
+    user_id = agent_cfg.get("user_id") or os.environ.get("USERNAME", "")
+
     return EventLogger(
         store=store,
         dashboard_url=dashboard_url,
+        dashboard_token=server_cfg.get("dashboard_token", ""),
         timeout=server_cfg.get("request_timeout_sec", 10),
-        send_immediately=bool(log_cfg.get("send_immediately", False)),
+        send_immediately=send_now,
+        agent_id=agent_cfg.get("agent_id", ""),
+        user_id=user_id,
+        department=agent_cfg.get("department", "Unknown"),
     )
 
 
@@ -127,9 +136,17 @@ def make_block_handler(
         result  = api_client.analyze(payload)
 
         logger.info(
-            "[%s] AI 판단: action=%s risk=%.0f reason=%s",
-            channel, result.action, result.risk_score, result.reason,
+            "[%s] AI 판단: action=%s confidence=%.2f reason=%s",
+            channel, result.action, result.confidence_score, result.reason,
         )
+
+        _extra = {
+            "event_id":        payload.request_id,
+            "ai_score":        result.confidence_score,
+            "reason":          result.reason,
+            "latency_ms":      int(result.latency_ms),
+            "detection_type":  "RULE_BASED" if api_client.is_mock else "HYBRID",
+        }
 
         if result.should_block:
             notify_blocked(process_name, hits)
@@ -139,17 +156,16 @@ def make_block_handler(
                 process_name=process_name,
                 hits=hits,
                 text=text,
-                extra={"risk_score": result.risk_score, "reason": result.reason},
+                extra=_extra,
             )
         elif result.needs_review:
-            # 지금은 통과하되 기록만 남김 (대시보드에서 사람이 검토)
             event_logger.log(
                 channel=channel,
                 action="review",
                 process_name=process_name,
                 hits=hits,
                 text=text,
-                extra={"risk_score": result.risk_score, "reason": result.reason},
+                extra=_extra,
             )
             logger.warning("[%s] review 기록 — %s", channel, process_name)
         # action == "allow" → 기록 없이 통과
@@ -171,43 +187,61 @@ def build_clipboard_hook(
     logger      = logging.getLogger(__name__)
 
     def on_text_pasted(text: str, process_name: str) -> bool:
-        """True 반환 시 붙여넣기 차단."""
+        """True 반환 시 붙여넣기 차단.
+
+        정규식 탐지(로컬)에서 히트가 나면 즉시 True를 반환해 붙여넣기를 막는다.
+        AI 분석은 백그라운드 스레드에서 수행해 Windows LowLevelHooksTimeout(기본 300ms)
+        초과로 훅이 무시되는 문제를 방지한다.
+        """
         hits = rule_filter.match(text)
         if not hits:
             return False
 
-        payload = payload_builder.build(text, hits, "clipboard", process_name)
-        result  = api_client.analyze(payload)
+        # ── 정규식 히트 → 즉시 차단, AI는 비동기 처리 ──────────────────────
+        def _ai_then_notify() -> None:
+            payload = payload_builder.build(text, hits, "clipboard", process_name)
+            result  = api_client.analyze(payload)
 
-        logger.info(
-            "[clipboard] AI 판단: action=%s risk=%.0f reason=%s",
-            result.action, result.risk_score, result.reason,
-        )
-
-        if result.should_block:
-            notify_blocked(process_name, hits)
-            event_logger.log(
-                channel="clipboard",
-                action="blocked",
-                process_name=process_name,
-                hits=hits,
-                text=text,
-                extra={"risk_score": result.risk_score, "reason": result.reason},
+            logger.info(
+                "[clipboard] AI 판단: action=%s confidence=%.2f reason=%s",
+                result.action, result.confidence_score, result.reason,
             )
-            return True   # 붙여넣기 차단
 
-        if result.needs_review:
-            event_logger.log(
-                channel="clipboard",
-                action="review",
-                process_name=process_name,
-                hits=hits,
-                text=text,
-                extra={"risk_score": result.risk_score, "reason": result.reason},
-            )
-            logger.warning("[clipboard] review 기록 — 붙여넣기 허용")
+            _extra = {
+                "event_id":       payload.request_id,
+                "ai_score":       result.confidence_score,
+                "reason":         result.reason,
+                "latency_ms":     int(result.latency_ms),
+                "detection_type": "RULE_BASED" if api_client.is_mock else "HYBRID",
+            }
 
-        return False  # allow / review 모두 붙여넣기 허용
+            if result.should_block:
+                notify_blocked(process_name, hits)
+                event_logger.log(
+                    channel="clipboard",
+                    action="blocked",
+                    process_name=process_name,
+                    hits=hits,
+                    text=text,
+                    extra=_extra,
+                )
+            elif result.needs_review:
+                notify_blocked(process_name, hits)
+                event_logger.log(
+                    channel="clipboard",
+                    action="review",
+                    process_name=process_name,
+                    hits=hits,
+                    text=text,
+                    extra=_extra,
+                )
+                logger.warning("[clipboard] review — 붙여넣기는 차단됨")
+            else:
+                # AI가 허용 판정 — 정규식 오탐. 이미 차단된 붙여넣기를 로그만 남긴다.
+                logger.info("[clipboard] AI allow — 정규식 오탐으로 간주, 로그 생략")
+
+        threading.Thread(target=_ai_then_notify, daemon=True, name="ClipboardAI").start()
+        return True  # 정규식 히트 즉시 차단
 
     return ClipboardHook(
         should_inspect=inspector.should_inspect,

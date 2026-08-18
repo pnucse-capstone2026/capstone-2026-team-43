@@ -320,11 +320,13 @@ class UsbGuardUserMode:
         logger.warning("[UsbGuard] 민감 정보 탐지: %s  hits=%s", file_path, hit_ids)
 
         # AI 판단 (mock 또는 실제)
+        payload = None
+        result  = None
         try:
             payload = self._pb.build(
                 text=text,
                 hits=hits,
-                channel="usb_file",
+                channel="file_guard",
                 process_name=f"usb_copy@{drive}",
             )
             result = self._ac.analyze(payload)
@@ -335,12 +337,21 @@ class UsbGuardUserMode:
 
         # 이벤트 로그
         self._el.log(
-            channel="usb_file",
+            channel="file_guard",
             action=action,
             process_name=f"usb_copy@{drive}",
             hits=hits,
             text=text[:500],
-            extra={"file_path": file_path, "file_size": file_size, "drive": drive},
+            extra={
+                "event_id":       (payload.request_id if result and payload else None),
+                "ai_score":       (result.confidence_score if result else 1.0),
+                "reason":         (result.reason if result else "USB 민감정보 탐지"),
+                "latency_ms":     (int(result.latency_ms) if result else 0),
+                "detection_type": ("RULE_BASED" if getattr(self._ac, "is_mock", True) else "HYBRID"),
+                "file_path":      file_path,
+                "file_size":      file_size,
+                "drive":          drive,
+            },
         )
 
         logger.info("[UsbGuard] AI 판단: action=%s  file=%s", action, file_path)

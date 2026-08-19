@@ -383,6 +383,8 @@ def build_web_proxy(
         log_traffic=bool(wp_cfg.get("log_traffic", True)),
         skip_path_patterns=wp_cfg.get("skip_path_patterns", []),
         min_body_bytes=int(wp_cfg.get("min_body_bytes", 0)),
+        drive_domains=wp_cfg.get("drive_domains", []),
+        drive_upload_patterns=wp_cfg.get("drive_upload_patterns", []),
     )
 
 

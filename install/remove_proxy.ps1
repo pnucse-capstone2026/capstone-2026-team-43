@@ -51,5 +51,10 @@ if ($isAdmin) {
     Write-Host "    WARN  Not admin. Remove cert manually via certmgr.msc (Trusted Root)."
 }
 
+Write-Step 3 "Remove QUIC block firewall rule"
+$ruleName = "SentryDLP - Block QUIC UDP 443"
+netsh advfirewall firewall delete rule name=$ruleName 2>&1 | Out-Null
+Write-OK "Firewall rule removed (QUIC re-enabled after browser restart)"
+
 Write-Host ""
-Write-OK "Teardown complete."
+Write-OK "Teardown complete. Restart Chrome/Edge to restore normal QUIC behavior."

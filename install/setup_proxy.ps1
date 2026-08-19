@@ -167,17 +167,42 @@ Set-ItemProperty -Path $regPath -Name "ProxyOverride" -Value "localhost;127.0.0.
 Notify-ProxyChange
 Write-OK "Proxy enabled for Chrome/Edge (WinINet)"
 
-# --- 4. Firefox note ---
-Write-Step 4 "Firefox note"
+# --- 4. Block QUIC (UDP 443) via Windows Firewall ---
+# Chrome 104+ ignores the QuicAllowed=0 policy. QUIC uses UDP port 443 to bypass TCP proxies.
+# Blocking outbound UDP 443 forces Chrome/Edge to fall back to HTTPS/TCP -> routed through proxy.
+Write-Step 4 "Block QUIC (UDP 443) via Windows Firewall to force HTTPS/TCP through proxy"
+
+$ruleName = "SentryDLP - Block QUIC UDP 443"
+$existing = netsh advfirewall firewall show rule name=$ruleName 2>&1 | Out-String
+if ($existing -match "규칙 이름|Rule Name") {
+    Write-OK "Firewall rule already exists: $ruleName"
+} else {
+    netsh advfirewall firewall add rule `
+        name=$ruleName `
+        protocol=UDP `
+        dir=out `
+        remoteport=443 `
+        action=block | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-OK "Firewall rule added: Block outbound UDP 443 (QUIC)"
+    } else {
+        Write-Warn "Failed to add firewall rule. Chrome may still use QUIC."
+    }
+}
+Write-Host "    NOTE: Restart Chrome/Edge for this to take effect."
+
+# --- 5. Firefox note ---
+Write-Step 5 "Firefox note"
 Write-Warn "Firefox uses its own cert store. Import CA manually if needed:"
 Write-Host "    Cert file: $storeCert"
 Write-Host "    about:preferences#privacy -> Certificates -> Authorities -> Import"
 Write-Host "    about:preferences#general  -> Network Settings -> Manual proxy 127.0.0.1:$Port"
+Write-Host "    To disable QUIC in Firefox: about:config -> network.http.http3.enabled = false"
 
-# --- 5. Done ---
-Write-Step 5 "Next"
+# --- 6. Done ---
+Write-Step 6 "Next"
 Write-Host "    web_proxy is enabled in config\channel_policy.json"
-Write-Host "    Start agent: python sentry_user_agent.py"
-Write-Host "    Or:          python main_agent.py"
+Write-Host "    Start agent: python main_agent.py"
+Write-Host "    Then test: upload a file to Google Drive / Gmail"
 Write-Host ""
-Write-OK "Setup complete."
+Write-OK "Setup complete. Restart Chrome/Edge before testing."

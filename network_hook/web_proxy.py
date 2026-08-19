@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import email as _email_lib
 import json
 import logging
@@ -15,6 +16,7 @@ import re
 import threading
 import urllib.parse
 from email import message_from_bytes
+from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlparse, parse_qs
 
@@ -96,8 +98,12 @@ class _DLPAddon:
         log_traffic: bool = True,
         skip_path_patterns: Optional[list[str]] = None,
         min_body_bytes: int = 0,
+        drive_domains: Optional[list[str]] = None,
+        drive_upload_patterns: Optional[list[str]] = None,
     ) -> None:
         self._domains           = frozenset(d.lower().lstrip("*.") for d in inspect_domains)
+        self._drive_domains     = frozenset(d.lower().lstrip("*.") for d in (drive_domains or []))
+        self._drive_upload_patterns = [p.lower() for p in (drive_upload_patterns or [])]
         self._rule_filter       = rule_filter
         self._builder           = payload_builder
         self._api               = api_client
@@ -115,22 +121,39 @@ class _DLPAddon:
 
     # ── mitmproxy 훅 ─────────────────────────────────────────────────────────
 
+    def http_connect(self, flow) -> None:  # noqa: ANN001
+        """DLP 대상 도메인 CONNECT만 로그. 그 외는 무시."""
+        host = flow.request.pretty_host.lower()
+        if self._is_target(host) or self._is_drive_target(host):
+            logger.info("[WebProxy] CONNECT → %s [DLP 대상]", flow.request.pretty_host)
+
     def request(self, flow) -> None:  # noqa: ANN001
         """요청이 서버로 전달되기 전 호출. block 결정 시 즉시 응답 설정."""
         try:
             self._register_upload_init(flow)
 
-            # ── 업로드 관련 요청 전체 사전 로그 (도메인 파악용) ─────────────────
+            # ── 업로드 관련 요청 사전 로그 (도메인 파악용) ──────────────────────
             url = flow.request.pretty_url
             url_lower = url.lower()
-            if self._is_target(flow.request.pretty_host.lower()):
-                if "upload_id=" in url_lower or "/_/upload" in url_lower:
-                    logger.info(
-                        "[WebProxy] Upload 요청 수신: method=%s  size=%d  url=%s",
-                        flow.request.method,
-                        len(flow.request.content or b""),
-                        url[:200],
-                    )
+            host = flow.request.pretty_host.lower()
+            if self._is_drive_target(host) and flow.request.method in ("POST", "PUT", "PATCH"):
+                cmd = flow.request.headers.get("x-goog-upload-command", "")
+                logger.info(
+                    "[WebProxy] Drive HTTP: method=%s size=%d cmd=%s url=%s",
+                    flow.request.method,
+                    len(flow.request.content or b""),
+                    cmd or "-",
+                    url[:200],
+                )
+            elif self._is_target(host) and any(
+                p in url_lower for p in ("upload_id=", "/_/upload", "/upload/drive/")
+            ):
+                logger.info(
+                    "[WebProxy] Upload 요청 수신: method=%s  size=%d  url=%s",
+                    flow.request.method,
+                    len(flow.request.content or b""),
+                    url[:200],
+                )
 
             self._handle(flow)
         except Exception:
@@ -146,17 +169,19 @@ class _DLPAddon:
         if not self._log_traffic:
             return
         try:
-            if not self._is_mail_send(flow):
+            channel = self._get_dlp_channel(flow)
+            if not channel:
                 return
             req = flow.request
             res = flow.response
             if res is None:
                 return
             logger.info(
-                "[WebProxy] <- status=%s  %s %s",
+                "[WebProxy] <- status=%s  %s %s  [%s]",
                 res.status_code,
                 req.method,
                 req.pretty_url[:200],
+                channel,
             )
         except Exception:
             logger.debug("[WebProxy] response 로그 실패", exc_info=True)
@@ -165,24 +190,34 @@ class _DLPAddon:
 
     def _register_upload_init(self, flow) -> None:
         """업로드 초기화 POST에서 파일 메타데이터를 추출해 임시 저장."""
-        req = flow.request
-        # Google resumable upload 초기화 식별: X-Goog-Upload-Protocol 헤더
+        req  = flow.request
+        host = req.pretty_host.lower()
         if req.method != "POST":
             return
-        if not self._is_target(req.pretty_host.lower()):
+        if not self._is_target(host) and not self._is_drive_target(host):
             return
         upload_protocol = req.headers.get("x-goog-upload-protocol", "")
-        if not upload_protocol and "/_/upload" not in req.pretty_url:
+        upload_cmd = req.headers.get("x-goog-upload-command", "").lower()
+        url = req.pretty_url.lower()
+        is_init = (
+            upload_cmd == "start"
+            or bool(upload_protocol)
+            or "/_/upload" in url
+            or ("uploadtype=resumable" in url and "upload_id=" not in url)
+        )
+        if not is_init:
             return
 
         filename = (
-            req.headers.get("x-goog-upload-original-filename", "")
+            req.headers.get("x-goog-upload-file-name", "")
+            or req.headers.get("x-goog-upload-original-filename", "")
             or req.headers.get("x-goog-upload-filename", "")
             or req.headers.get("x-goog-upload-header-content-disposition", "")
         )
         content_type = (
             req.headers.get("x-goog-upload-header-content-type", "")
             or req.headers.get("x-goog-upload-content-type", "")
+            or req.headers.get("x-upload-content-type", "")
         )
         if filename or content_type:
             # 세션 ID를 모르는 상태 → response hook에서 연결
@@ -300,8 +335,8 @@ class _DLPAddon:
     def _handle(self, flow) -> None:
         from mitmproxy.http import Response  # 지연 임포트 — 서비스 시 유효
 
-        # 메일 전송 패킷만 처리 (일반 트래픽/GET 로깅 없음)
-        if not self._is_mail_send(flow):
+        channel = self._get_dlp_channel(flow)
+        if not channel:
             return
 
         # 실제 파일 업로드 PUT 감지 — 명시적 로그
@@ -345,7 +380,7 @@ class _DLPAddon:
 
         host = flow.request.pretty_host.lower()
         process_name = f"browser@{host}"
-        payload = self._builder.build(text, hits, "web_mail", process_name)
+        payload = self._builder.build(text, hits, channel, process_name)
         result  = self._api.analyze(payload)
 
         logger.info(
@@ -364,7 +399,7 @@ class _DLPAddon:
 
         if result.should_block:
             self._event_logger.log(
-                channel="web_mail",
+                channel=channel,
                 action="blocked",
                 process_name=process_name,
                 hits=hits,
@@ -401,7 +436,7 @@ class _DLPAddon:
 
         if result.needs_review:
             self._event_logger.log(
-                channel="web_mail",
+                channel=channel,
                 action="review",
                 process_name=process_name,
                 hits=hits,
@@ -414,44 +449,184 @@ class _DLPAddon:
     # ── 도메인 매칭 ──────────────────────────────────────────────────────────
 
     def _is_target(self, host: str) -> bool:
-        if host in self._domains:
-            return True
+        """웹메일 도메인 여부."""
         for domain in self._domains:
             if host == domain or host.endswith("." + domain):
                 return True
         return False
 
+    def _is_drive_target(self, host: str) -> bool:
+        """클라우드 드라이브 도메인 여부."""
+        for domain in self._drive_domains:
+            if host == domain or host.endswith("." + domain):
+                return True
+        return False
+
+    def _get_dlp_channel(self, flow) -> str:
+        """DLP 채널 이름 반환. 검사 대상 아니면 빈 문자열."""
+        if self._is_mail_send(flow):
+            return "web_mail"
+        if self._is_drive_upload(flow):
+            return "drive_upload"
+        return ""
+
+    def _is_google_drive_host(self, host: str) -> bool:
+        return any(
+            k in host
+            for k in (
+                "drive.google.com",
+                "docs.google.com",
+                "googleapis.com",
+                "clients6.google.com",
+            )
+        )
+
+    def _is_drive_upload(self, flow) -> bool:
+        """클라우드 드라이브 파일 업로드 요청 여부.
+
+        Drive 웹 UI는 Gmail과 같이 /_/upload + X-Goog-Upload-* 를 쓴다.
+        Drive API는 /upload/drive/?uploadType=media|multipart|resumable 를 쓴다.
+        세션 초기화(start / resumable 메타데이터)는 파일 본문이 없으므로 제외.
+        """
+        if flow.request.method not in ("POST", "PUT", "PATCH"):
+            return False
+        host = flow.request.pretty_host.lower()
+        if not self._is_drive_target(host):
+            return False
+
+        url_lower = flow.request.pretty_url.lower()
+        body_len  = len(flow.request.content or b"")
+        cmd       = flow.request.headers.get("x-goog-upload-command", "").lower()
+        ct        = flow.request.headers.get("content-type", "").lower()
+
+        # ── Google Drive / Docs / Drive API ──────────────────────────────────
+        if self._is_google_drive_host(host):
+            if cmd.strip() == "start":
+                return False
+            if (
+                "uploadtype=resumable" in url_lower
+                and "upload_id=" not in url_lower
+                and "upload" not in cmd
+                and "json" in ct
+            ):
+                return False
+
+            if "upload" in cmd or "finalize" in cmd:
+                return body_len >= 1
+            if "upload_id=" in url_lower or "/_/upload" in url_lower:
+                return body_len >= 1
+            if "/upload/drive" in url_lower or "/upload/resumable" in url_lower:
+                return body_len >= 1
+            for pat in self._drive_upload_patterns:
+                if pat in url_lower:
+                    return body_len >= 1
+            return False
+
+        # ── Naver MYBOX ──────────────────────────────────────────────────────
+        if "mybox.naver.com" in host:
+            if "/upload" in url_lower:
+                return body_len >= 1
+            return "multipart" in ct and body_len >= 1
+
+        # ── OneDrive / Microsoft Graph ────────────────────────────────────────
+        if any(d in host for d in ("onedrive.live.com", "api.onedrive.com",
+                                    "graph.microsoft.com", "storage.live.com")):
+            if "createuploadsession" in url_lower:
+                return False
+            if url_lower.endswith("/content") or ":/content" in url_lower:
+                return body_len >= 1
+            if flow.request.method == "PUT":
+                return body_len >= 1
+            return False
+
+        # ── Dropbox ──────────────────────────────────────────────────────────
+        if "dropboxapi.com" in host:
+            if "/2/files/upload" in url_lower:
+                return body_len >= 1
+            return False
+
+        # ── Box ───────────────────────────────────────────────────────────────
+        if "box.com" in host:
+            if "/api/2.0/files/content" in url_lower:
+                return body_len >= 1
+            if "/api/2.0/files/upload_session" in url_lower and flow.request.method == "PUT":
+                return body_len >= 1
+            return False
+
+        for pat in self._drive_upload_patterns:
+            if pat in url_lower:
+                return body_len >= 1
+        return False
+
     # ── 본문 텍스트 추출 ─────────────────────────────────────────────────────
 
     def _extract_text(self, flow) -> str:
-        ct   = flow.request.headers.get("content-type", "").lower()
-        body = flow.request.content
+        ct       = flow.request.headers.get("content-type", "").lower()
+        body     = flow.request.content
         if not body:
             return ""
 
-        # 실제 파일 업로드 (upload_id 포함 또는 /_/upload 경로) — 바이너리를 FileInspector로 검사
-        url = flow.request.pretty_url
+        url       = flow.request.pretty_url
         url_lower = url.lower()
-        if "upload_id=" in url_lower or "/_/upload" in url_lower:
-            result = self._extract_upload_binary(flow, body, ct)
-            if result:
-                return result
-            # 추출 실패 시 일반 경로로 폴백하지 않음 (메타데이터일 가능성 높음)
-            return ""
+        host      = flow.request.pretty_host.lower()
+        cmd       = flow.request.headers.get("x-goog-upload-command", "").lower()
 
+        # Drive/Gmail 업로드가 multipart 이면 파트별로 파일 내용을 추출해야 한다.
+        # (JSON 메타데이터 + 파일 본문이 한 요청에 실림)
+        if "multipart/" in ct:
+            extracted = self._from_multipart(body, ct)
+            if extracted and extracted.strip():
+                return extracted
+
+        # ── 파일 업로드 바이너리 (Gmail 첨부 + Drive 웹/API) ───────────────────
+        is_binary_upload = (
+            "upload_id=" in url_lower
+            or "/_/upload" in url_lower
+            or "/upload/drive" in url_lower
+            or "/upload/resumable" in url_lower
+            or "upload" in cmd
+            or "finalize" in cmd
+            or self._is_drive_upload(flow)
+        )
+        if is_binary_upload and (
+            self._is_drive_target(host) or "upload_id=" in url_lower or "/_/upload" in url_lower
+        ):
+            return self._extract_upload_binary(flow, body, ct) or ""
+
+        # ── Dropbox 업로드: Dropbox-API-Arg 헤더에서 파일명 추출 ───────────────
+        if "dropboxapi.com" in host and "/2/files/upload" in url_lower:
+            return self._extract_dropbox_upload(flow, body, ct)
+
+        # ── OneDrive / Microsoft Graph PUT ────────────────────────────────────
+        if any(d in host for d in ("onedrive.live.com", "api.onedrive.com",
+                                    "graph.microsoft.com", "storage.live.com")):
+            if url_lower.endswith("/content") or ":/content" in url_lower or flow.request.method == "PUT":
+                return self._extract_upload_binary(flow, body, ct) or ""
+
+        # ── Box 업로드 ────────────────────────────────────────────────────────
+        if "box.com" in host:
+            if "multipart" in ct:
+                return self._from_multipart(body, ct)
+            return self._extract_upload_binary(flow, body, ct) or ""
+
+        # ── Naver MYBOX (multipart 또는 octet-stream) ─────────────────────────
+        if "mybox.naver.com" in host:
+            if "multipart" in ct:
+                return self._from_multipart(body, ct)
+            return self._extract_upload_binary(flow, body, ct) or ""
+
+        # ── 일반 경로 (웹메일 본문 텍스트 등) ────────────────────────────────
         if "application/json" in ct:
             return self._from_json(body)
-        if "multipart/" in ct:          # form-data, related, mixed 모두 처리
+        if "multipart/" in ct:
             return self._from_multipart(body, ct)
         if "application/x-www-form-urlencoded" in ct:
             return self._from_urlencoded(body)
-        # application/octet-stream 등 — FileInspector로 시도
         if self._fi and ("octet-stream" in ct or not ct):
             fname = url.rstrip("/").rsplit("/", 1)[-1].split("?")[0] or "upload.bin"
             extracted = self._fi.extract_from_bytes(body, fname)
             if extracted:
                 return extracted
-        # 기타 (text/plain 등)
         return body.decode("utf-8", errors="ignore")
 
     def _extract_upload_binary(self, flow, body: bytes, ct: str) -> str:
@@ -470,6 +645,12 @@ class _DLPAddon:
         filename  = meta.get("filename", "")
         stored_ct = meta.get("content_type", "") or ct
 
+        if not filename:
+            filename = (
+                flow.request.headers.get("x-goog-upload-file-name", "")
+                or flow.request.headers.get("x-goog-upload-original-filename", "")
+            )
+
         # Content-Disposition 헤더에서 파일명 보완
         if not filename:
             cd = flow.request.headers.get("content-disposition", "")
@@ -479,6 +660,11 @@ class _DLPAddon:
 
         # Content-Type에서 확장자 추론 (알려진 파일 형식일 때)
         effective_ct = stored_ct.split(";")[0].strip()
+        if "multipart/" in effective_ct:
+            extracted = self._from_multipart(body, stored_ct or ct)
+            if extracted and extracted.strip():
+                return extracted
+
         if not filename or "." not in filename:
             ext      = _infer_ext_from_ct(effective_ct)
             filename = f"upload{ext}" if ext else "upload.bin"
@@ -515,6 +701,56 @@ class _DLPAddon:
 
         return ""
 
+    def _extract_dropbox_upload(self, flow, body: bytes, ct: str) -> str:
+        """Dropbox 업로드 본문 텍스트 추출.
+
+        Dropbox-API-Arg 헤더에서 파일 경로를 읽어 파일명을 확보하고,
+        본문(raw 바이너리)을 FileInspector로 검사.
+        """
+        filename = ""
+        try:
+            arg_header = flow.request.headers.get("dropbox-api-arg", "")
+            if arg_header:
+                meta = json.loads(arg_header)
+                path = meta.get("path", "")
+                if path:
+                    filename = path.rsplit("/", 1)[-1]
+        except Exception:
+            pass
+
+        if not filename:
+            cd = flow.request.headers.get("content-disposition", "")
+            m  = re.search(r'filename[*]?=["\']?([^"\';\r\n]+)', cd)
+            if m:
+                filename = m.group(1).strip()
+
+        if not filename:
+            ext      = _infer_ext_from_ct(ct.split(";")[0].strip())
+            filename = f"upload{ext}" if ext else "upload.bin"
+
+        logger.info(
+            "[WebProxy] Dropbox 업로드 검사: filename=%s size=%d",
+            filename, len(body),
+        )
+
+        if self._fi:
+            try:
+                text = self._fi.extract_from_bytes(body, filename)
+                if text and text.strip():
+                    return text
+            except Exception as exc:
+                logger.debug("[WebProxy] Dropbox FileInspector 실패: %s", exc)
+
+        try:
+            decoded = body.decode("utf-8", errors="strict")
+            ratio   = sum(1 for c in decoded if c.isprintable() or c in "\n\r\t") / max(len(decoded), 1)
+            if ratio > 0.85:
+                return decoded
+        except UnicodeDecodeError:
+            pass
+
+        return ""
+
     def _from_json(self, body: bytes) -> str:
         """JSON 객체에서 모든 문자열 값을 재귀 수집."""
         try:
@@ -526,7 +762,13 @@ class _DLPAddon:
         return "\n".join(parts)
 
     def _from_multipart(self, body: bytes, ct: str) -> str:
-        """multipart 파트별 텍스트 + 첨부파일 추출."""
+        """multipart 파트별 텍스트 + 첨부파일 추출.
+
+        Google Drive 웹 업로드는 filename 헤더 없이
+        1) application/json 메타데이터 (title/mimeType)
+        2) 파일 본문 (text/plain, octet-stream 등)
+        순서로 보낸다. JSON에서 파일명을 읽어 두 번째 파트에 적용한다.
+        """
         try:
             mime = message_from_bytes(
                 b"Content-Type: " + ct.encode() + b"\r\n\r\n" + body
@@ -535,28 +777,121 @@ class _DLPAddon:
             return body.decode("utf-8", errors="ignore")
 
         parts: list[str] = []
+        inferred_name = ""
+
         for part in mime.walk():
+            if part.is_multipart():
+                continue
             payload = part.get_payload(decode=True)
             if not payload:
                 continue
-            filename = part.get_filename()
-            pct = part.get_content_type() or ""
+            filename = part.get_filename() or ""
+            pct = (part.get_content_type() or "").lower()
 
-            if filename and self._fi:
+            if "json" in pct:
                 try:
-                    extracted = self._fi.extract_from_bytes(payload, filename)
+                    meta = json.loads(payload.decode("utf-8", errors="ignore"))
+                except Exception:
+                    meta = None
+                if isinstance(meta, dict):
+                    inferred_name = (
+                        meta.get("title")
+                        or meta.get("name")
+                        or meta.get("originalFilename")
+                        or inferred_name
+                    )
+                    if inferred_name:
+                        logger.info("[WebProxy] Drive 메타데이터 파일명: %s", inferred_name)
+                continue
+
+            name = filename or inferred_name
+            encoding = (part.get("Content-Transfer-Encoding") or "").lower()
+            if "base64" in encoding:
+                try:
+                    payload = base64.b64decode(payload)
+                except Exception:
+                    pass
+
+            if name and self._fi:
+                try:
+                    extracted = self._fi.extract_from_bytes(payload, name)
                     if extracted:
-                        parts.append(f"[첨부: {filename}]\n{extracted}")
+                        parts.append(f"[첨부: {name}]\n{extracted}")
+                        continue
                 except Exception as exc:
-                    logger.debug("[WebProxy] 첨부 추출 실패 %s: %s", filename, exc)
-            elif "text" in pct:
-                charset = part.get_param("charset", "utf-8")
+                    logger.debug("[WebProxy] 첨부 추출 실패 %s: %s", name, exc)
+
+            if self._fi and pct not in ("application/json",):
+                ext = _infer_ext_from_ct(pct) or (
+                    Path(name).suffix if name else ""
+                )
+                guess = name or (f"upload{ext}" if ext else "upload.bin")
+                try:
+                    extracted = self._fi.extract_from_bytes(payload, guess)
+                    if extracted:
+                        parts.append(extracted)
+                        continue
+                except Exception:
+                    pass
+
+            if "text" in pct or pct in ("application/octet-stream", ""):
+                charset = part.get_param("charset", "utf-8") or "utf-8"
                 try:
                     parts.append(payload.decode(charset, errors="ignore"))
                 except Exception:
                     parts.append(payload.decode("utf-8", errors="ignore"))
 
-        return "\n\n".join(parts)
+        text = "\n\n".join(parts)
+        if text.strip():
+            return text
+        return self._from_multipart_fallback(body, ct)
+
+    def _from_multipart_fallback(self, body: bytes, ct: str) -> str:
+        """email 파서가 파트를 못 나눌 때 boundary 기준 수동 분리."""
+        boundary = ""
+        m = re.search(r'boundary=("?)([^";\s]+)\1', ct, re.I)
+        if m:
+            boundary = m.group(2)
+        if not boundary:
+            first = body.split(b"\n", 1)[0].strip().rstrip(b"\r")
+            if first.startswith(b"--") and len(first) > 4:
+                boundary = first[2:].decode("ascii", errors="ignore").strip()
+        if not boundary:
+            return ""
+
+        marker = b"--" + boundary.encode("ascii", errors="ignore")
+        chunks = body.split(marker)
+        inferred_name = ""
+        out: list[str] = []
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if not chunk or chunk in (b"-", b"--"):
+                continue
+            header_blob, _, payload = chunk.partition(b"\r\n\r\n")
+            if not payload:
+                header_blob, _, payload = chunk.partition(b"\n\n")
+            payload = payload.rstrip(b"\r\n-")
+            if not payload:
+                continue
+            headers = header_blob.decode("utf-8", errors="ignore").lower()
+            if "application/json" in headers:
+                try:
+                    meta = json.loads(payload.decode("utf-8", errors="ignore"))
+                    if isinstance(meta, dict):
+                        inferred_name = (
+                            meta.get("title") or meta.get("name") or inferred_name
+                        )
+                except Exception:
+                    pass
+                continue
+            name = inferred_name or "upload.bin"
+            if self._fi:
+                extracted = self._fi.extract_from_bytes(payload, name)
+                if extracted:
+                    out.append(f"[첨부: {name}]\n{extracted}")
+                    continue
+            out.append(payload.decode("utf-8", errors="ignore"))
+        return "\n\n".join(out)
 
     def _from_urlencoded(self, body: bytes) -> str:
         """application/x-www-form-urlencoded 파싱."""
@@ -605,10 +940,15 @@ class WebProxy:
         log_traffic: bool = True,
         skip_path_patterns: Optional[list[str]] = None,
         min_body_bytes: int = 0,
+        drive_domains: Optional[list[str]] = None,
+        drive_upload_patterns: Optional[list[str]] = None,
     ) -> None:
         self._port = port
         self._inspect_domains = [
             d.strip().lower().lstrip("*.") for d in inspect_domains if d and d.strip()
+        ]
+        self._drive_domains = [
+            d.strip().lower().lstrip("*.") for d in (drive_domains or []) if d and d.strip()
         ]
         self._addon = _DLPAddon(
             inspect_domains=self._inspect_domains,
@@ -621,6 +961,8 @@ class WebProxy:
             log_traffic=log_traffic,
             skip_path_patterns=skip_path_patterns,
             min_body_bytes=min_body_bytes,
+            drive_domains=self._drive_domains,
+            drive_upload_patterns=drive_upload_patterns,
         )
         self._thread: Optional[threading.Thread] = None
         self._master: Any = None
@@ -634,9 +976,10 @@ class WebProxy:
         )
         self._thread.start()
         logger.info(
-            "[채널] web_proxy   ON  (port=%d, mail_hosts=%d)",
+            "[채널] web_proxy   ON  (port=%d, mail_hosts=%d, drive_hosts=%d)",
             self._port,
             len(self._inspect_domains),
+            len(self._drive_domains),
         )
 
     def stop(self) -> None:
@@ -687,13 +1030,14 @@ class WebProxy:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
 
-        allow = self._allow_host_patterns(self._inspect_domains)
+        # 메일 + 드라이브 도메인 전체 TLS 가로채기 (그 외는 터널 통과)
+        all_domains = self._inspect_domains + self._drive_domains
+        allow = self._allow_host_patterns(all_domains)
         opts_kwargs: dict[str, Any] = {
             "listen_host": "127.0.0.1",
             "listen_port": self._port,
             "ssl_insecure": False,
         }
-        # 메일 호스트만 TLS 가로채기. 그 외는 터널 통과 (복호화·로그 없음)
         if allow:
             opts_kwargs["allow_hosts"] = allow
 
@@ -709,7 +1053,9 @@ class WebProxy:
 
         if allow:
             logger.info(
-                "[WebProxy] TLS inspect limited to %d mail host pattern(s)",
+                "[WebProxy] TLS inspect: mail=%d drive=%d total=%d pattern(s)",
+                len(self._inspect_domains),
+                len(self._drive_domains),
                 len(allow),
             )
 

@@ -2,7 +2,7 @@
 
 server:
   # AI 서버 URL. 비워두면 mock 모드로 동작 (severity 기반 즉시 판단)
-  ai_base_url: "https://expenses-image-physiology-restoration.trycloudflare.com"
+  ai_base_url: ""
   # 웹 대시보드 베이스 URL (uvicorn 기본 포트 8000)
   dashboard_url: "http://127.0.0.1:8000"
   # 웹 대시보드 인증 토큰 (X-Agent-Token 헤더)

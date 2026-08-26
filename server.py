@@ -7,9 +7,11 @@ print("⏳ 1. 필수 패키지 및 Cloudflare 터널링 도구 설치 중...")
 import os
 import time
 import re
+import json
 import threading
 import subprocess
 import traceback
+from datetime import datetime, timezone
 from typing import Optional, Literal, List
 
 # 드라이브(FUSE 마운트)는 chmod +x가 제대로 안 먹으므로 /content에 받습니다
@@ -34,6 +36,40 @@ BLOCK_THRESHOLD = 0.41   # v7 재검증: Youden's J / F1 공통 최적값 (preci
 REVIEW_THRESHOLD = 0.20  # v7 재검증: 비기밀 allow율 손해 없이 기밀 recall 개선 확인된 값
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# =====================================================================
+# 2-1. 요청/응답 로깅 설정
+# =====================================================================
+# 드라이브에 저장해서 Colab 세션이 끊겨도 로그가 남도록 함
+LOG_DIR = "/content/drive/MyDrive/2026_졸업과제/도메인편향개선2/logs"
+LOG_PATH = os.path.join(LOG_DIR, "analyze_log.jsonl")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+
+def log_event(record: dict) -> None:
+    """요청/응답 1건을 JSONL 파일에 한 줄씩 append. 로깅 실패가 API 응답을 막지 않도록 예외 흡수."""
+    record["logged_at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        traceback.print_exc()
+
+
+def read_recent_logs(limit: int = 20) -> list:
+    """최근 N건의 로그를 최신순으로 반환."""
+    if not os.path.exists(LOG_PATH):
+        return []
+    with open(LOG_PATH, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    recent = lines[-limit:]
+    logs = []
+    for line in reversed(recent):
+        try:
+            logs.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return logs
 
 # =====================================================================
 # 3. 요청/응답 스키마 (중간보고서 2.2절 공식 스키마 기준)
@@ -96,8 +132,18 @@ except Exception as e:
 @app.post("/api/v1/analyze", response_model=AgentResponse)
 def analyze_text(request: AgentRequest):
     if not model_loaded:
+        log_event({
+            "event_id": request.event_id, "channel": request.channel,
+            "user_id": request.user_id, "status": "error",
+            "error": "model_not_loaded",
+        })
         raise HTTPException(status_code=503, detail="AI 모델이 로드되지 않았습니다. 서버 로그를 확인하세요.")
     if not request.snippet.strip():
+        log_event({
+            "event_id": request.event_id, "channel": request.channel,
+            "user_id": request.user_id, "status": "error",
+            "error": "empty_snippet",
+        })
         raise HTTPException(status_code=400, detail="분석할 콘텐츠(snippet)가 비어 있습니다.")
 
     try:
@@ -124,6 +170,18 @@ def analyze_text(request: AgentRequest):
             "allow": "정상 비즈니스 문맥으로 판정",
         }
 
+        log_event({
+            "event_id": request.event_id,
+            "channel": request.channel,
+            "user_id": request.user_id,
+            "snippet_preview": request.snippet[:200],  # 앞 200자만 저장
+            "matched_patterns": request.matched_patterns,
+            "status": "ok",
+            "decision": decision,
+            "confidence_score": round(confidence_score, 4),
+            "latency_ms": latency_ms,
+        })
+
         return AgentResponse(
             event_id=request.event_id,
             decision=decision,
@@ -136,6 +194,11 @@ def analyze_text(request: AgentRequest):
         raise
     except Exception as e:
         traceback.print_exc()
+        log_event({
+            "event_id": request.event_id, "channel": request.channel,
+            "user_id": request.user_id, "status": "error",
+            "error": str(e),
+        })
         raise HTTPException(status_code=500, detail=f"AI 추론 엔진 내부 에러: {str(e)}")
 
 @app.get("/")
@@ -147,6 +210,12 @@ def health_check():
         "block_threshold": BLOCK_THRESHOLD,
         "review_threshold": REVIEW_THRESHOLD,
     }
+
+
+@app.get("/api/v1/debug/logs")
+def get_recent_logs(limit: int = 20):
+    """최근 로그 N건 반환."""
+    return {"count": min(limit, 200), "logs": read_recent_logs(min(limit, 200))}
 
 # =====================================================================
 # 6. Cloudflare 백그라운드 서버 가동

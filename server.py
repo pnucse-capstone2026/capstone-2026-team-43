@@ -28,10 +28,10 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 # =====================================================================
 # 2. 설정값
 # =====================================================================
-MODEL_PATH = "/content/drive/MyDrive/2026_졸업과제/도메인편향개선2/koelectra-dlp-v6/final"
-MODEL_VERSION = "koelectra-dlp-v6"
-BLOCK_THRESHOLD = 0.44   # ROC/PR curve 분석 (Youden's J / F1 / F2 공통 최적값)
-REVIEW_THRESHOLD = 0.30  # 실제 라이브 서버 233건 배치 테스트로 검증 완료 (기밀 오분류 0건, 비기밀 allow율 96.4%)
+MODEL_PATH = "/content/drive/MyDrive/2026_졸업과제/도메인편향개선2/koelectra-dlp-v7/final"
+MODEL_VERSION = "koelectra-dlp-v7"
+BLOCK_THRESHOLD = 0.41   # v7 재검증: Youden's J / F1 공통 최적값 (precision 유지하며 recall 0.939->0.970 개선)
+REVIEW_THRESHOLD = 0.20  # v7 재검증: 비기밀 allow율 손해 없이 기밀 recall 개선 확인된 값
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 

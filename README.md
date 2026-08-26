@@ -2,7 +2,7 @@
 
 담당: 박동화 (AI 모델 / 판별 서버)
 최종 갱신: 2026-08-13
-모델 버전: `koelectra-dlp-v6`
+모델 버전: `koelectra-dlp-v7`
 
 ## 1. 엔드포인트
 
@@ -47,7 +47,7 @@ Content-Type: application/json
 | `event_id` | string | Request에서 받은 값 그대로 반환 |
 | `decision` | string | `allow` / `review` / `block` |
 | `confidence_score` | float | 0.0 ~ 1.0, 기밀일 확률 |
-| `model_version` | string | 현재: `koelectra-dlp-v6` |
+| `model_version` | string | 현재: `koelectra-dlp-v7` |
 | `latency_ms` | float | AI 서버 내부 추론 소요 시간(ms) |
 | `reason` | string | 확장 필드 (공식 스키마엔 없음), 판정 사유 요약 |
 
@@ -57,7 +57,7 @@ Content-Type: application/json
   "event_id": "evt-20260813-00123",
   "decision": "block",
   "confidence_score": 0.5584,
-  "model_version": "koelectra-dlp-v6",
+  "model_version": "koelectra-dlp-v7",
   "latency_ms": 49.72,
   "reason": "AI 문맥 분석 결과 기밀 가능성이 높아 차단 조치"
 }
@@ -67,11 +67,11 @@ Content-Type: application/json
 
 | confidence_score | decision |
 |---|---|
-| >= 0.44 | block |
-| 0.30 ~ 0.44 | review |
-| < 0.30 | allow |
+| >= 0.41 | block |
+| 0.20 ~ 0.41 | review |
+| < 0.20 | allow |
 
-ROC/PR curve 분석(Youden's J, F1, F2 공통 최적값) + 라이브 서버 233건 배치 테스트로 검증한 값. 모델 재학습 시 threshold도 재산정 필요.
+v7(구어체 보강 재학습) 기준 ROC/PR curve 재검증 결과. 격식체 하드케이스 50건 + 신규 구어체 하드케이스 34건 + 정식 Test셋으로 검증. 모델 재학습 시 threshold도 재산정 필요.
 
 ## 5. 에러 응답
 

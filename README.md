@@ -138,7 +138,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --env-file .env
 - `event_id`: Agent 재전송 중복 방지를 위해 신규 연동에서는 항상 포함 권장
 - `ai_score`: `0.0` 이상 `1.0` 이하
 - `action_taken`: `BLOCKED`, `WARNED`, `ALLOWED`
-- `leak_channel`: `USB_COPY`, `WEB_UPLOAD`, `EMAIL_ATTACHMENT`, `PRINT`, `MESSENGER`
+- `leak_channel`: `USB_COPY`, `WEB_UPLOAD`, `EMAIL_ATTACHMENT`, `PRINT`, `MESSENGER`, `CLIPBOARD`, `CLOUD_DRIVE`
 - 최초 저장: HTTP `201`, `duplicate: false`
 - 동일한 `event_id` 재전송: HTTP `200`, `duplicate: true`
 
@@ -164,9 +164,10 @@ Host Agent는 `POST /api/v1/logs`로 탐지 결과를 전송합니다. 요청 �
 | `file_name` | string | 필수 | 1~255자. 반출 대상 파일명 |
 | `file_path` | string | 선택 | 최대 500자. 반출 대상 파일의 원본 경로 |
 | `process_name` | string | 선택 | 최대 120자. 반출을 시도한 프로세스 |
-| `leak_channel` | string | 필수 | `USB_COPY`, `WEB_UPLOAD`, `EMAIL_ATTACHMENT`, `PRINT`, `MESSENGER` |
+| `leak_channel` | string | 필수 | `USB_COPY`, `WEB_UPLOAD`, `EMAIL_ATTACHMENT`, `PRINT`, `MESSENGER`, `CLIPBOARD`, `CLOUD_DRIVE` |
 | `detection_type` | string | 필수 | `RULE_BASED`, `AI_MODEL`, `HYBRID` |
 | `ai_score` | number | 필수 | `0.0`~`1.0` 범위의 민감도 점수 |
+| `model_version` | string | 선택 | 최대 100자. AI 판별에 사용된 모델 버전. 규칙 전용 판정이면 생략 가능 |
 | `matched_keywords` | string[] | 선택 | 탐지에 사용된 키워드. 생략 시 빈 배열 |
 | `policy_id` | string | 선택 | 최대 100자. 적용된 Agent/서버 정책 식별자 |
 | `action_taken` | string | 필수 | `BLOCKED`, `WARNED`, `ALLOWED` |
@@ -191,6 +192,7 @@ Host Agent는 `POST /api/v1/logs`로 탐지 결과를 전송합니다. 요청 �
   "leak_channel": "WEB_UPLOAD",
   "detection_type": "HYBRID",
   "ai_score": 0.96,
+  "model_version": "koelectra-dlp-v7",
   "matched_keywords": ["source_code", "api_key", "prototype"],
   "policy_id": "DLP-WEB-001",
   "action_taken": "BLOCKED",
@@ -231,7 +233,7 @@ Host Agent가 웹 서버의 분석 중계 API를 사용할 경우 `POST /api/v1/
 | 필드 | JSON 타입 | 필수 여부 | 제약 및 설명 |
 | --- | --- | --- | --- |
 | `event_id` | string | 필수 | 1~120자. 이후 로그 저장 요청과 동일한 ID 사용 |
-| `channel` | string | 필수 | `clipboard`, `outlook`, `http`, `usb`, `web_upload`, `email_attachment`, `print`, `messenger` |
+| `channel` | string | 필수 | `clipboard`, `outlook`, `http`, `usb`, `smtp`, `web_mail`, `file_guard`, `drive_upload`, `web_upload`, `email_attachment`, `print`, `messenger` |
 | `user_id` | string | 필수 | 1~100자. 분석 대상 사용자 식별자 |
 | `matched_patterns` | string[] | 선택 | Agent 규칙 탐지 단계에서 찾은 패턴 목록 |
 | `snippet` | string | 필수 | 1~4000자. AI가 분석할 텍스트 또는 요약 |
@@ -264,6 +266,7 @@ Host Agent가 웹 서버의 분석 중계 API를 사용할 경우 `POST /api/v1/
 | `confidence_score` | number | `0.0`~`1.0` 범위로 정규화된 점수 |
 | `model_version` | string | 분석 모델 버전 |
 | `latency_ms` | integer | 분석 응답 지연 시간(ms) |
+| `reason` | string | Host Agent가 판정 로그와 알림에 사용하는 분석 사유 |
 | `evidence_summary` | string | AI 분석 근거 요약 |
 
 ```json
@@ -273,9 +276,12 @@ Host Agent가 웹 서버의 분석 중계 API를 사용할 경우 `POST /api/v1/
   "confidence_score": 0.96,
   "model_version": "team-ai-v1",
   "latency_ms": 132,
+  "reason": "Source code and API key context was detected.",
   "evidence_summary": "Source code and API key context was detected."
 }
 ```
+
+`reason`은 Host Agent 응답 파서가 직접 읽는 필수 호환 필드입니다. 기존 대시보드·로그 연동을 위해 `evidence_summary`도 함께 반환하며, 외부 AI가 둘 중 하나만 반환하면 웹 서버가 다른 필드를 같은 내용으로 채웁니다.
 
 Agent가 분석 결과를 로그 저장 필드로 변환할 때 사용하는 규칙:
 
@@ -290,6 +296,8 @@ Agent가 분석 결과를 로그 저장 필드로 변환할 때 사용하는 규
 ### 6.4 SQLite 데이터 구조
 
 SQLite 파일은 `backend/dlp_dashboard.db`에 생성되지만 Git에는 포함하지 않습니다. 팀원 간 데이터 연동은 DB 파일을 공유하지 않고 위 REST API 계약을 기준으로 합니다.
+
+기존 DB로 서버를 시작하면 누락된 `model_version` 컬럼을 자동으로 추가합니다. 기존 로그는 유지되며, 이전 로그의 `model_version`은 `null`로 조회됩니다.
 
 `dlp_logs` 테이블:
 
@@ -310,6 +318,7 @@ SQLite 파일은 `backend/dlp_dashboard.db`에 생성되지만 Git에는 포함�
 | `leak_channel` | TEXT | 반출 채널 |
 | `detection_type` | TEXT | 탐지 방식 |
 | `ai_score` | REAL | AI 민감도 점수 |
+| `model_version` | TEXT | AI 판별 모델 버전 |
 | `matched_keywords` | TEXT | 키워드 배열을 쉼표로 연결해 저장 |
 | `policy_id` | TEXT | 적용 정책 식별자 |
 | `action_taken` | TEXT | 최종 조치 결과 |
@@ -369,6 +378,8 @@ python scripts/send_sample_log.py --scenario usb_copy
 - `email_attachment`
 - `print`
 - `messenger`
+- `clipboard`
+- `cloud_drive`
 
 중복 방지 확인:
 
@@ -452,13 +463,17 @@ AI_SERVER_TIMEOUT_SECONDS=5
   "confidence_score": 0.73,
   "model_version": "team-ai-v1",
   "latency_ms": 120,
+  "reason": "민감 패턴과 외부 전송 문맥이 함께 탐지됨",
   "evidence_summary": "민감 패턴과 외부 전송 문맥이 함께 탐지됨"
 }
 ```
 
+- `event_id`는 요청의 `event_id`와 일치해야 하며, 누락되거나 다르면 웹 서버가 HTTP `502`를 반환합니다.
 - `decision`은 `allow`, `review`, `block` 중 하나여야 합니다.
 - 점수 필드는 `confidence_score`, `ai_score`, `score`를 받을 수 있습니다.
 - `1` 초과 `100` 이하의 점수는 웹 서버에서 `0.0`~`1.0` 범위로 변환합니다.
+- `model_version`은 비어 있지 않은 문자열이어야 하며, 누락되거나 공백이면 HTTP `502`를 반환합니다.
+- `reason`은 `reason` → `evidence_summary` → `explanation`, `evidence_summary`는 `evidence_summary` → `reason` → `explanation` 순으로 정규화하여 두 필드를 모두 반환합니다.
 - 연결 실패, 잘못된 JSON 또는 잘못된 응답 형식은 HTTP `502`로 반환합니다.
 
 ## 9. 자동화 테스트

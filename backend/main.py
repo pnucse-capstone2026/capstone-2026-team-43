@@ -29,6 +29,16 @@ AI_SERVER_URL = os.getenv("AI_SERVER_URL", "").strip()
 AI_SERVER_TOKEN = os.getenv("AI_SERVER_TOKEN", "").strip()
 AI_SERVER_TIMEOUT_SECONDS = float(os.getenv("AI_SERVER_TIMEOUT_SECONDS", "5"))
 
+LEAK_CHANNELS = [
+    "USB_COPY",
+    "WEB_UPLOAD",
+    "EMAIL_ATTACHMENT",
+    "PRINT",
+    "MESSENGER",
+    "CLIPBOARD",
+    "CLOUD_DRIVE",
+]
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -62,9 +72,18 @@ class LogCreate(BaseModel):
     file_name: str = Field(..., min_length=1, max_length=255)
     file_path: str | None = Field(default=None, max_length=500)
     process_name: str | None = Field(default=None, max_length=120)
-    leak_channel: Literal["USB_COPY", "WEB_UPLOAD", "EMAIL_ATTACHMENT", "PRINT", "MESSENGER"]
+    leak_channel: Literal[
+        "USB_COPY",
+        "WEB_UPLOAD",
+        "EMAIL_ATTACHMENT",
+        "PRINT",
+        "MESSENGER",
+        "CLIPBOARD",
+        "CLOUD_DRIVE",
+    ]
     detection_type: Literal["RULE_BASED", "AI_MODEL", "HYBRID"]
     ai_score: float = Field(..., ge=0.0, le=1.0)
+    model_version: str | None = Field(default=None, max_length=100)
     matched_keywords: list[str] = Field(default_factory=list)
     policy_id: str | None = Field(default=None, max_length=100)
     action_taken: Literal["BLOCKED", "WARNED", "ALLOWED"]
@@ -80,6 +99,10 @@ class AnalyzeRequest(BaseModel):
         "outlook",
         "http",
         "usb",
+        "smtp",
+        "web_mail",
+        "file_guard",
+        "drive_upload",
         "web_upload",
         "email_attachment",
         "print",
@@ -89,6 +112,16 @@ class AnalyzeRequest(BaseModel):
     matched_patterns: list[str] = Field(default_factory=list)
     snippet: str = Field(..., min_length=1, max_length=4000)
     metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+
+
+class AnalyzeResponse(BaseModel):
+    event_id: str = Field(..., min_length=1, max_length=120)
+    decision: Literal["allow", "review", "block"]
+    confidence_score: float = Field(..., ge=0.0, le=1.0)
+    model_version: str = Field(..., min_length=1, max_length=100)
+    latency_ms: int = Field(..., ge=0, le=600000)
+    reason: str = Field(..., max_length=500)
+    evidence_summary: str = Field(..., max_length=500)
 
 
 class PolicyCreate(BaseModel):
@@ -158,7 +191,17 @@ def mock_analyze(payload: AnalyzeRequest) -> dict:
         score += 0.10
         evidence.append(f"dest:{destination}")
 
-    if payload.channel in {"usb", "web_upload", "email_attachment", "http"}:
+    if payload.channel in {
+        "usb",
+        "file_guard",
+        "web_upload",
+        "web_mail",
+        "drive_upload",
+        "email_attachment",
+        "outlook",
+        "smtp",
+        "http",
+    }:
         score += 0.06
         evidence.append(f"channel:{payload.channel}")
 
@@ -173,13 +216,15 @@ def mock_analyze(payload: AnalyzeRequest) -> dict:
     latency_ms = max(1, round((perf_counter() - started_at) * 1000))
     evidence_summary = ", ".join(dict.fromkeys(evidence[:8])) or "no sensitive signal"
 
+    reason = f"Mock AI analysis matched: {evidence_summary}."
     return {
         "event_id": payload.event_id,
         "decision": decision,
         "confidence_score": confidence_score,
         "model_version": MOCK_MODEL_VERSION,
         "latency_ms": latency_ms,
-        "evidence_summary": f"Mock AI analysis matched: {evidence_summary}.",
+        "reason": reason,
+        "evidence_summary": reason,
     }
 
 
@@ -198,6 +243,12 @@ def get_external_analyze_url() -> str | None:
 def normalize_external_analyze_response(payload: AnalyzeRequest, raw_response: Any, latency_ms: int) -> dict:
     if not isinstance(raw_response, dict):
         raise HTTPException(status_code=502, detail="AI server response must be a JSON object.")
+
+    raw_event_id = raw_response.get("event_id")
+    if not isinstance(raw_event_id, str) or not raw_event_id.strip():
+        raise HTTPException(status_code=502, detail="AI server response has no valid event_id.")
+    if raw_event_id != payload.event_id:
+        raise HTTPException(status_code=502, detail="AI server response event_id does not match the request.")
 
     decision = str(raw_response.get("decision", "")).lower()
     if decision not in {"allow", "review", "block"}:
@@ -223,18 +274,32 @@ def normalize_external_analyze_response(payload: AnalyzeRequest, raw_response: A
     except (TypeError, ValueError):
         normalized_latency = latency_ms
 
+    raw_model_version = raw_response.get("model_version")
+    if not isinstance(raw_model_version, str) or not raw_model_version.strip():
+        raise HTTPException(status_code=502, detail="AI server response has no valid model_version.")
+
+    fallback_reason = "External AI server returned no analysis reason."
+    reason = str(
+        raw_response.get("reason")
+        or raw_response.get("evidence_summary")
+        or raw_response.get("explanation")
+        or fallback_reason
+    )
+    evidence_summary = str(
+        raw_response.get("evidence_summary")
+        or raw_response.get("reason")
+        or raw_response.get("explanation")
+        or fallback_reason
+    )
+
     return {
-        "event_id": str(raw_response.get("event_id") or payload.event_id),
+        "event_id": raw_event_id,
         "decision": decision,
         "confidence_score": round(confidence_score, 2),
-        "model_version": str(raw_response.get("model_version") or "external-ai-server"),
+        "model_version": raw_model_version,
         "latency_ms": normalized_latency,
-        "evidence_summary": str(
-            raw_response.get("evidence_summary")
-            or raw_response.get("reason")
-            or raw_response.get("explanation")
-            or "External AI server returned no evidence summary."
-        ),
+        "reason": reason,
+        "evidence_summary": evidence_summary,
     }
 
 
@@ -292,6 +357,7 @@ def ensure_log_schema(cursor: sqlite3.Cursor) -> None:
         "decision_reason": "TEXT",
         "latency_ms": "INTEGER",
         "received_at": "TEXT",
+        "model_version": "TEXT",
     }
 
     for column_name, column_type in column_definitions.items():
@@ -335,6 +401,7 @@ def init_db() -> None:
                 leak_channel TEXT NOT NULL,
                 detection_type TEXT NOT NULL,
                 ai_score REAL NOT NULL,
+                model_version TEXT,
                 matched_keywords TEXT NOT NULL,
                 policy_id TEXT,
                 action_taken TEXT NOT NULL,
@@ -409,6 +476,7 @@ def serialize_log(row: sqlite3.Row) -> dict:
         "leak_channel": row["leak_channel"],
         "detection_type": row["detection_type"],
         "ai_score": row["ai_score"],
+        "model_version": row["model_version"],
         "matched_keywords": [item for item in matched_keywords.split(",") if item],
         "policy_id": row["policy_id"],
         "action_taken": row["action_taken"],
@@ -464,7 +532,7 @@ async def logs_page() -> FileResponse:
     return FileResponse(FRONTEND_PATH)
 
 
-@app.post("/api/v1/analyze")
+@app.post("/api/v1/analyze", response_model=AnalyzeResponse)
 async def analyze_event(
     payload: AnalyzeRequest,
     _: None = Depends(verify_agent_token),
@@ -504,8 +572,9 @@ async def create_log(
                     event_id, agent_id, timestamp, received_at, host_ip, hostname,
                     user_id, department, file_name, file_path, process_name,
                     leak_channel, detection_type, ai_score, matched_keywords,
-                    policy_id, action_taken, decision_reason, evidence_summary, latency_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    model_version, policy_id, action_taken, decision_reason,
+                    evidence_summary, latency_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.event_id,
@@ -523,6 +592,7 @@ async def create_log(
                     payload.detection_type,
                     payload.ai_score,
                     ",".join(payload.matched_keywords),
+                    payload.model_version,
                     payload.policy_id,
                     payload.action_taken,
                     payload.decision_reason,
@@ -656,7 +726,7 @@ async def log_filter_options() -> dict:
         "users": [row["user_id"] for row in users],
         "agents": [row["agent_id"] for row in agents],
         "actions": ["BLOCKED", "WARNED", "ALLOWED"],
-        "leak_channels": ["USB_COPY", "WEB_UPLOAD", "EMAIL_ATTACHMENT", "PRINT", "MESSENGER"],
+        "leak_channels": LEAK_CHANNELS,
     }
 
 
@@ -784,6 +854,7 @@ async def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
                 "file_path": item["file_path"],
                 "leak_channel": item["leak_channel"],
                 "ai_score": item["ai_score"],
+                "model_version": item["model_version"],
                 "action_taken": item["action_taken"],
                 "decision_reason": item["decision_reason"],
                 "evidence_summary": item["evidence_summary"],

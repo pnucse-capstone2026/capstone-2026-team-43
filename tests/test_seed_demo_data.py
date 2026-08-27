@@ -60,10 +60,15 @@ def test_seed_demo_data_is_idempotent_and_restores_the_backend_path(
                 "SELECT action_taken, COUNT(*) FROM dlp_logs GROUP BY action_taken"
             ).fetchall()
         )
+        model_version_count = connection.execute(
+            "SELECT COUNT(*) FROM dlp_logs WHERE model_version = ?",
+            ("koelectra-dlp-v7",),
+        ).fetchone()[0]
 
     assert log_count == 12
     assert policy_count == 2
     assert action_counts == {"ALLOWED": 3, "BLOCKED": 6, "WARNED": 3}
+    assert model_version_count == 9
 
 
 def test_seeded_data_populates_dashboard_summary(

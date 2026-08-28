@@ -12,6 +12,7 @@ from time import perf_counter
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +29,8 @@ MOCK_MODEL_VERSION = "koelectra-v0.1-mock"
 AI_SERVER_URL = os.getenv("AI_SERVER_URL", "").strip()
 AI_SERVER_TOKEN = os.getenv("AI_SERVER_TOKEN", "").strip()
 AI_SERVER_TIMEOUT_SECONDS = float(os.getenv("AI_SERVER_TIMEOUT_SECONDS", "5"))
+HIGH_RISK_SCORE_THRESHOLD = 0.85
+DATABASE_EPOCH_KEY = "database_epoch"
 
 LEAK_CHANNELS = [
     "USB_COPY",
@@ -385,6 +388,21 @@ def init_db() -> None:
         cursor = connection.cursor()
         cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS dlp_metadata (
+                metadata_key TEXT PRIMARY KEY,
+                metadata_value TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO dlp_metadata (metadata_key, metadata_value)
+            VALUES (?, ?)
+            """,
+            (DATABASE_EPOCH_KEY, str(uuid4())),
+        )
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS dlp_logs (
                 log_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_id TEXT,
@@ -693,6 +711,74 @@ async def list_logs(
     return {"items": [serialize_log(row) for row in rows], "count": len(rows)}
 
 
+@app.get("/api/v1/alerts")
+async def list_realtime_alerts(
+    after_log_id: int | None = Query(default=None, ge=0),
+    cursor_epoch: str | None = Query(default=None, min_length=1, max_length=64),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    """Return new high-risk logs using the DB epoch and server-issued log_id.
+
+    The first request omits ``after_log_id`` and only receives the current cursor,
+    so opening the dashboard never raises alerts for historical rows. A changed
+    ``cursor_epoch`` replays high-risk rows from the replacement database.
+    """
+    with closing(get_connection()) as connection:
+        database_epoch = connection.execute(
+            """
+            SELECT metadata_value
+            FROM dlp_metadata
+            WHERE metadata_key = ?
+            """,
+            (DATABASE_EPOCH_KEY,),
+        ).fetchone()["metadata_value"]
+        latest_log_id = connection.execute(
+            "SELECT COALESCE(MAX(log_id), 0) AS latest_log_id FROM dlp_logs"
+        ).fetchone()["latest_log_id"]
+
+        if after_log_id is None:
+            return {
+                "items": [],
+                "count": 0,
+                "next_cursor": latest_log_id,
+                "cursor_epoch": database_epoch,
+                "cursor_reset": False,
+            }
+
+        cursor_reset = (
+            (cursor_epoch is not None and cursor_epoch != database_epoch)
+            or after_log_id > latest_log_id
+        )
+        effective_after_log_id = 0 if cursor_reset else after_log_id
+
+        rows = connection.execute(
+            """
+            SELECT * FROM dlp_logs
+            WHERE log_id > ?
+              AND (action_taken = 'BLOCKED' OR ai_score >= ?)
+            ORDER BY log_id ASC
+            LIMIT ?
+            """,
+            (effective_after_log_id, HIGH_RISK_SCORE_THRESHOLD, limit),
+        ).fetchall()
+
+    last_returned_id = (
+        rows[-1]["log_id"] if rows else effective_after_log_id
+    )
+    next_cursor = (
+        last_returned_id
+        if len(rows) == limit
+        else max(latest_log_id, last_returned_id)
+    )
+    return {
+        "items": [serialize_log(row) for row in rows],
+        "count": len(rows),
+        "next_cursor": next_cursor,
+        "cursor_epoch": database_epoch,
+        "cursor_reset": cursor_reset,
+    }
+
+
 @app.get("/api/v1/logs/filter-options")
 async def log_filter_options() -> dict:
     with closing(get_connection()) as connection:
@@ -822,7 +908,8 @@ async def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
         [
             item
             for item in logs
-            if item["action_taken"] == "BLOCKED" or item["ai_score"] >= 0.85
+            if item["action_taken"] == "BLOCKED"
+            or item["ai_score"] >= HIGH_RISK_SCORE_THRESHOLD
         ],
         key=lambda item: item["timestamp"],
         reverse=True,

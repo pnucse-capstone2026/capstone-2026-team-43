@@ -773,6 +773,154 @@
             font-weight: 900;
         }
 
+        .status-button {
+            appearance: none;
+            cursor: pointer;
+            font: inherit;
+        }
+
+        .status-button[aria-pressed="true"] {
+            color: var(--blue);
+            border-color: rgba(37, 99, 235, 0.34);
+            background: var(--blue-soft);
+        }
+
+        .realtime-risk-alert {
+            position: fixed;
+            top: 22px;
+            right: 22px;
+            z-index: 1000;
+            width: min(430px, calc(100vw - 32px));
+            padding: 18px;
+            display: grid;
+            grid-template-columns: 46px minmax(0, 1fr) 32px;
+            gap: 13px;
+            border-radius: 20px;
+            color: #7f1d1d;
+            background: linear-gradient(145deg, #fff7f7, #ffffff);
+            border: 1px solid rgba(220, 38, 38, 0.32);
+            box-shadow: 0 24px 70px rgba(127, 29, 29, 0.24);
+            animation: risk-alert-in 0.28s ease-out;
+        }
+
+        .realtime-risk-alert[hidden] {
+            display: none;
+        }
+
+        .realtime-risk-icon {
+            width: 46px;
+            height: 46px;
+            display: grid;
+            place-items: center;
+            border-radius: 15px;
+            color: #ffffff;
+            background: var(--danger);
+            font-size: 24px;
+            font-weight: 950;
+            box-shadow: 0 10px 24px rgba(220, 38, 38, 0.28);
+        }
+
+        .realtime-risk-copy {
+            min-width: 0;
+        }
+
+        .realtime-risk-kicker {
+            color: var(--danger);
+            font-size: 11px;
+            font-weight: 950;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .realtime-risk-title {
+            display: block;
+            margin-top: 5px;
+            color: #7f1d1d;
+            font-size: 17px;
+            line-height: 1.35;
+        }
+
+        .realtime-risk-message,
+        .realtime-risk-meta {
+            margin-top: 7px;
+            color: #7f1d1d;
+            font-size: 13px;
+            line-height: 1.45;
+            word-break: break-word;
+        }
+
+        .realtime-risk-meta {
+            color: #a43b3b;
+            font-size: 12px;
+        }
+
+        .realtime-risk-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-top: 12px;
+        }
+
+        .realtime-risk-link,
+        .realtime-risk-dismiss {
+            min-height: 34px;
+            padding: 8px 11px;
+            border-radius: 10px;
+            font-size: 12px;
+            font-weight: 900;
+        }
+
+        .realtime-risk-link {
+            display: inline-flex;
+            align-items: center;
+            color: #ffffff;
+            background: var(--danger);
+        }
+
+        .realtime-risk-dismiss {
+            cursor: pointer;
+            color: #7f1d1d;
+            background: #ffffff;
+            border: 1px solid rgba(220, 38, 38, 0.22);
+        }
+
+        .realtime-risk-close {
+            width: 32px;
+            height: 32px;
+            padding: 0;
+            border: 0;
+            border-radius: 10px;
+            cursor: pointer;
+            color: #a43b3b;
+            background: transparent;
+            font-size: 20px;
+            line-height: 1;
+        }
+
+        .realtime-risk-close:hover,
+        .realtime-risk-close:focus {
+            color: #7f1d1d;
+            background: var(--danger-soft);
+            outline: none;
+        }
+
+        @keyframes risk-alert-in {
+            from {
+                opacity: 0;
+                transform: translateY(-14px) scale(0.98);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .realtime-risk-alert {
+                animation: none;
+            }
+        }
+
         .page-intro {
             margin-bottom: 18px;
             padding: 24px;
@@ -893,6 +1041,28 @@
     </style>
 </head>
 <body>
+    <section
+        id="realtimeRiskAlert"
+        class="realtime-risk-alert"
+        role="alert"
+        aria-live="assertive"
+        aria-atomic="true"
+        hidden
+    >
+        <div class="realtime-risk-icon" aria-hidden="true">!</div>
+        <div class="realtime-risk-copy">
+            <span class="realtime-risk-kicker">실시간 위험 알림</span>
+            <strong class="realtime-risk-title" id="realtimeRiskTitle">신규 고위험 이벤트</strong>
+            <p class="realtime-risk-message" id="realtimeRiskMessage"></p>
+            <p class="realtime-risk-meta" id="realtimeRiskMeta"></p>
+            <div class="realtime-risk-actions">
+                <a class="realtime-risk-link" id="realtimeRiskDetails" href="/logs">상세 로그 보기</a>
+                <button class="realtime-risk-dismiss" id="realtimeRiskDismiss" type="button">알림 닫기</button>
+            </div>
+        </div>
+        <button class="realtime-risk-close" id="realtimeRiskClose" type="button" aria-label="위험 알림 닫기">×</button>
+    </section>
+
     <div class="app-shell">
         <aside class="sidebar">
             <div class="brand">
@@ -929,6 +1099,9 @@
                     <span class="status-pill"><span class="status-dot"></span> API <strong id="apiStatus">확인 중</strong></span>
                     <span class="status-pill">최근 조회 <strong id="lastUpdated">-</strong></span>
                     <span class="status-pill">최다 채널 <strong id="topChannel">-</strong></span>
+                    <button class="status-pill status-button" id="alertSoundToggle" type="button" aria-pressed="false">
+                        경고음 <strong id="alertSoundStatus">끔</strong>
+                    </button>
                 </div>
             </header>
 
@@ -1108,6 +1281,10 @@
 
     <script>
         const LOGS_PER_PAGE = 10;
+        const RISK_POLL_INTERVAL_MS = 2000;
+        const RISK_POLL_TIMEOUT_MS = 5000;
+        const RISK_POLL_MAX_BACKOFF_MS = 30000;
+        const RISK_ALERT_VISIBLE_MS = 12000;
         const params = new URLSearchParams(window.location.search);
         let currentPage = window.location.pathname === "/logs" ? "logs" : "dashboard";
         let pendingLogId = params.get("log_id") ? Number(params.get("log_id")) : null;
@@ -1116,6 +1293,17 @@
         let currentLogPage = 1;
         let selectedLogId = null;
         let currentLogDetail = null;
+        let riskAlertCursor = null;
+        let riskAlertCursorEpoch = null;
+        let riskPollTimer = null;
+        let riskPollController = null;
+        let riskPollFailureCount = 0;
+        let riskPollGeneration = 0;
+        let riskAlertHideTimer = null;
+        let alertSoundEnabled = false;
+        let alertAudioContext = null;
+        let dashboardSummaryRequestGeneration = 0;
+        let dashboardSummaryRenderGeneration = 0;
 
         function setPage(page) {
             currentPage = page;
@@ -1205,6 +1393,238 @@
                 .replaceAll(">", "&gt;")
                 .replaceAll('"', "&quot;")
                 .replaceAll("'", "&#039;");
+        }
+
+        function renderDashboardSummary(summary) {
+            setText("lastUpdated", new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }));
+            setText("totalEvents", summary.kpis.total_events);
+            setText("avgScore", Number(summary.kpis.average_score).toFixed(2));
+            setText("topDepartment", summary.top_departments[0]?.department || "-");
+            setText("topChannel", summary.channel_breakdown[0]?.channel || "-");
+            setText("blockedPriority", `${summary.kpis.blocked_count}건`);
+            setText("warnedPriority", `${summary.kpis.warned_count}건`);
+            setText("allowedPriority", `${summary.kpis.allowed_count}건`);
+            const blockedRate = summary.kpis.total_events
+                ? Math.round((summary.kpis.blocked_count / summary.kpis.total_events) * 100)
+                : 0;
+            setText("blockedRate", `${blockedRate}%`);
+
+            timelineChart.data.labels = summary.timeline.map(item => item.date.slice(5));
+            timelineChart.data.datasets[0].data = summary.timeline.map(item => item.count);
+            timelineChart.update();
+
+            channelChart.data.labels = summary.channel_breakdown.map(item => item.channel);
+            channelChart.data.datasets[0].data = summary.channel_breakdown.map(item => item.count);
+            channelChart.update();
+
+            renderDepartmentRanking(summary.top_departments);
+            renderHighRiskEvents(summary.high_risk_events || []);
+        }
+
+        async function refreshDashboardSummary() {
+            const generation = ++dashboardSummaryRequestGeneration;
+            const response = await fetch("/api/v1/dashboard/summary", { cache: "no-store" });
+            if (!response.ok) {
+                throw new Error(`Dashboard summary request failed: ${response.status}`);
+            }
+            const summary = await response.json();
+            if (generation > dashboardSummaryRenderGeneration) {
+                dashboardSummaryRenderGeneration = generation;
+                renderDashboardSummary(summary);
+            }
+        }
+
+        function hideRealtimeRiskAlert() {
+            clearTimeout(riskAlertHideTimer);
+            riskAlertHideTimer = null;
+            document.getElementById("realtimeRiskAlert").hidden = true;
+        }
+
+        function scheduleRealtimeRiskAlertHide() {
+            clearTimeout(riskAlertHideTimer);
+            riskAlertHideTimer = window.setTimeout(hideRealtimeRiskAlert, RISK_ALERT_VISIBLE_MS);
+        }
+
+        function playRiskAlertTone() {
+            if (!alertSoundEnabled || !alertAudioContext) return;
+
+            const now = alertAudioContext.currentTime;
+            const oscillator = alertAudioContext.createOscillator();
+            const gain = alertAudioContext.createGain();
+            oscillator.type = "sine";
+            oscillator.frequency.setValueAtTime(880, now);
+            oscillator.frequency.setValueAtTime(660, now + 0.16);
+            gain.gain.setValueAtTime(0.0001, now);
+            gain.gain.exponentialRampToValueAtTime(0.20, now + 0.02);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.36);
+            oscillator.connect(gain);
+            gain.connect(alertAudioContext.destination);
+            oscillator.start(now);
+            oscillator.stop(now + 0.38);
+        }
+
+        async function toggleAlertSound() {
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContextClass) {
+                setText("alertSoundStatus", "미지원");
+                document.getElementById("alertSoundToggle").disabled = true;
+                return;
+            }
+
+            alertSoundEnabled = !alertSoundEnabled;
+            if (alertSoundEnabled) {
+                alertAudioContext ||= new AudioContextClass();
+                if (alertAudioContext.state === "suspended") {
+                    await alertAudioContext.resume();
+                }
+            }
+
+            const toggle = document.getElementById("alertSoundToggle");
+            toggle.setAttribute("aria-pressed", String(alertSoundEnabled));
+            setText("alertSoundStatus", alertSoundEnabled ? "켬" : "끔");
+            if (alertSoundEnabled) playRiskAlertTone();
+        }
+
+        function showRealtimeRiskAlert(items) {
+            const newest = items[items.length - 1];
+            const count = items.length;
+            const channelLabels = {
+                USB_COPY: "USB 반출",
+                WEB_UPLOAD: "웹 업로드",
+                EMAIL_ATTACHMENT: "이메일 첨부",
+                PRINT: "인쇄",
+                MESSENGER: "메신저",
+                CLIPBOARD: "클립보드",
+                CLOUD_DRIVE: "클라우드 드라이브"
+            };
+            const actionLabels = {
+                BLOCKED: "차단",
+                WARNED: "경고",
+                ALLOWED: "고위험 허용"
+            };
+            const channelLabel = channelLabels[newest.leak_channel] || newest.leak_channel || "반출";
+            const actionLabel = actionLabels[newest.action_taken] || newest.action_taken || "탐지";
+
+            setText(
+                "realtimeRiskTitle",
+                count > 1 ? `신규 고위험 이벤트 ${count}건` : `${channelLabel} ${actionLabel} 이벤트`
+            );
+            setText(
+                "realtimeRiskMessage",
+                count > 1
+                    ? `최근 이벤트: ${newest.file_name || "파일명 없음"}`
+                    : `${newest.file_name || "파일명 없음"}에서 위험 징후가 탐지되었습니다.`
+            );
+            setText(
+                "realtimeRiskMeta",
+                `${newest.department || "부서 미상"} · ${newest.user_id || "사용자 미상"} · AI ${Number(newest.ai_score || 0).toFixed(2)}`
+            );
+            document.getElementById("realtimeRiskDetails").href =
+                `/logs?log_id=${encodeURIComponent(newest.log_id)}`;
+
+            const alertElement = document.getElementById("realtimeRiskAlert");
+            alertElement.hidden = false;
+            scheduleRealtimeRiskAlertHide();
+            playRiskAlertTone();
+        }
+
+        function scheduleRiskPoll(delay, generation = riskPollGeneration) {
+            clearTimeout(riskPollTimer);
+            riskPollTimer = window.setTimeout(() => pollRealtimeRiskAlerts(generation), delay);
+        }
+
+        async function pollRealtimeRiskAlerts(generation) {
+            if (generation !== riskPollGeneration || document.hidden) return;
+
+            const controller = new AbortController();
+            riskPollController = controller;
+            let requestTimedOut = false;
+            const timeout = window.setTimeout(() => {
+                requestTimedOut = true;
+                controller.abort();
+            }, RISK_POLL_TIMEOUT_MS);
+
+            try {
+                const query = new URLSearchParams({ limit: "20" });
+                if (riskAlertCursor !== null) {
+                    query.set("after_log_id", String(riskAlertCursor));
+                    if (riskAlertCursorEpoch !== null) {
+                        query.set("cursor_epoch", riskAlertCursorEpoch);
+                    }
+                }
+                const response = await fetch(`/api/v1/alerts?${query.toString()}`, {
+                    cache: "no-store",
+                    signal: controller.signal
+                });
+                if (!response.ok) {
+                    throw new Error(`Risk alert poll failed: ${response.status}`);
+                }
+
+                const result = await response.json();
+                const items = Array.isArray(result.items) ? result.items : [];
+                const nextCursor = Number(result.next_cursor);
+                const nextCursorEpoch = typeof result.cursor_epoch === "string"
+                    ? result.cursor_epoch.trim()
+                    : "";
+                if (!Number.isInteger(nextCursor) || nextCursor < 0) {
+                    throw new Error("Risk alert poll returned an invalid cursor.");
+                }
+                if (!nextCursorEpoch) {
+                    throw new Error("Risk alert poll returned an invalid cursor epoch.");
+                }
+                const cursorEpochChanged = riskAlertCursorEpoch !== null
+                    && riskAlertCursorEpoch !== nextCursorEpoch;
+                if (result.cursor_reset === true || cursorEpochChanged) {
+                    riskAlertCursor = nextCursor;
+                } else {
+                    riskAlertCursor = Math.max(riskAlertCursor ?? 0, nextCursor);
+                }
+                riskAlertCursorEpoch = nextCursorEpoch;
+                riskPollFailureCount = 0;
+
+                if (items.length) {
+                    showRealtimeRiskAlert(items);
+                    refreshDashboardSummary().catch(error => {
+                        console.warn("고위험 이벤트 반영 후 대시보드 갱신 실패", error);
+                    });
+                }
+            } catch (error) {
+                if (error.name !== "AbortError" || requestTimedOut) {
+                    riskPollFailureCount += 1;
+                    console.warn(
+                        requestTimedOut
+                            ? "실시간 위험 알림 조회 시간 초과"
+                            : "실시간 위험 알림 조회 실패",
+                        error
+                    );
+                }
+            } finally {
+                clearTimeout(timeout);
+                if (riskPollController === controller) riskPollController = null;
+                if (generation === riskPollGeneration && !document.hidden) {
+                    const delay = riskPollFailureCount
+                        ? Math.min(
+                            RISK_POLL_INTERVAL_MS * (2 ** riskPollFailureCount),
+                            RISK_POLL_MAX_BACKOFF_MS
+                        )
+                        : RISK_POLL_INTERVAL_MS;
+                    scheduleRiskPoll(delay, generation);
+                }
+            }
+        }
+
+        function stopRiskPolling() {
+            riskPollGeneration += 1;
+            clearTimeout(riskPollTimer);
+            riskPollTimer = null;
+            if (riskPollController) riskPollController.abort();
+            riskPollController = null;
+        }
+
+        function startRiskPolling() {
+            stopRiskPolling();
+            const generation = riskPollGeneration;
+            scheduleRiskPoll(0, generation);
         }
 
         function renderDepartmentRanking(items) {
@@ -1628,6 +2048,7 @@
         }
 
         async function loadDashboard() {
+            const summaryGeneration = ++dashboardSummaryRequestGeneration;
             try {
                 const [health, summary] = await Promise.all([
                     fetch("/health").then(res => res.json()),
@@ -1635,29 +2056,10 @@
                 ]);
 
                 setText("apiStatus", health.status.toUpperCase());
-                setText("lastUpdated", new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }));
-                setText("totalEvents", summary.kpis.total_events);
-                setText("avgScore", Number(summary.kpis.average_score).toFixed(2));
-                setText("topDepartment", summary.top_departments[0]?.department || "-");
-                setText("topChannel", summary.channel_breakdown[0]?.channel || "-");
-                setText("blockedPriority", `${summary.kpis.blocked_count}건`);
-                setText("warnedPriority", `${summary.kpis.warned_count}건`);
-                setText("allowedPriority", `${summary.kpis.allowed_count}건`);
-                const blockedRate = summary.kpis.total_events
-                    ? Math.round((summary.kpis.blocked_count / summary.kpis.total_events) * 100)
-                    : 0;
-                setText("blockedRate", `${blockedRate}%`);
-
-                timelineChart.data.labels = summary.timeline.map(item => item.date.slice(5));
-                timelineChart.data.datasets[0].data = summary.timeline.map(item => item.count);
-                timelineChart.update();
-
-                channelChart.data.labels = summary.channel_breakdown.map(item => item.channel);
-                channelChart.data.datasets[0].data = summary.channel_breakdown.map(item => item.count);
-                channelChart.update();
-
-                renderDepartmentRanking(summary.top_departments);
-                renderHighRiskEvents(summary.high_risk_events || []);
+                if (summaryGeneration > dashboardSummaryRenderGeneration) {
+                    dashboardSummaryRenderGeneration = summaryGeneration;
+                    renderDashboardSummary(summary);
+                }
                 await loadFilterOptions();
                 await loadLogs();
 
@@ -1690,7 +2092,32 @@
             clearTimeout(window.logSearchTimer);
             window.logSearchTimer = setTimeout(loadLogs, 250);
         });
+        document.getElementById("alertSoundToggle").addEventListener("click", () => {
+            toggleAlertSound().catch(error => {
+                setText("alertSoundStatus", "오류");
+                console.warn("경고음 활성화 실패", error);
+            });
+        });
+        document.getElementById("realtimeRiskClose").addEventListener("click", hideRealtimeRiskAlert);
+        document.getElementById("realtimeRiskDismiss").addEventListener("click", hideRealtimeRiskAlert);
+        document.getElementById("realtimeRiskAlert").addEventListener("mouseenter", () => {
+            clearTimeout(riskAlertHideTimer);
+        });
+        document.getElementById("realtimeRiskAlert").addEventListener("mouseleave", scheduleRealtimeRiskAlertHide);
+        document.getElementById("realtimeRiskAlert").addEventListener("focusin", () => {
+            clearTimeout(riskAlertHideTimer);
+        });
+        document.getElementById("realtimeRiskAlert").addEventListener("focusout", scheduleRealtimeRiskAlertHide);
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) {
+                stopRiskPolling();
+            } else {
+                startRiskPolling();
+            }
+        });
+        window.addEventListener("pagehide", stopRiskPolling);
 
+        startRiskPolling();
         loadDashboard();
     </script>
 </body>

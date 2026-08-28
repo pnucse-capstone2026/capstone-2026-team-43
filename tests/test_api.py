@@ -103,10 +103,18 @@ def test_startup_creates_only_the_temporary_database(
         }
         log_count = connection.execute("SELECT COUNT(*) FROM dlp_logs").fetchone()[0]
         policy_count = connection.execute("SELECT COUNT(*) FROM dlp_policies").fetchone()[0]
+        database_epoch = connection.execute(
+            """
+            SELECT metadata_value
+            FROM dlp_metadata
+            WHERE metadata_key = 'database_epoch'
+            """
+        ).fetchone()[0]
 
-    assert {"dlp_logs", "dlp_policies"}.issubset(tables)
+    assert {"dlp_logs", "dlp_policies", "dlp_metadata"}.issubset(tables)
     assert log_count == 0
     assert policy_count == 2
+    assert database_epoch
 
 
 def test_log_schema_migration_adds_model_version_to_existing_database() -> None:
@@ -158,6 +166,25 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
         assert 'value="CLIPBOARD"' in response.text
         assert 'value="CLOUD_DRIVE"' in response.text
         assert "AI 모델 버전" in response.text
+
+
+def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
+    html = client.get("/dashboard").text
+
+    for marker in (
+        'id="realtimeRiskAlert"',
+        'aria-live="assertive"',
+        'id="alertSoundToggle"',
+        "const RISK_POLL_INTERVAL_MS = 2000",
+        "function pollRealtimeRiskAlerts",
+        'fetch(`/api/v1/alerts?',
+        'query.set("cursor_epoch", riskAlertCursorEpoch)',
+        "startRiskPolling();\n        loadDashboard();",
+        "result.cursor_reset === true || cursorEpochChanged",
+    ):
+        assert marker in html
+
+    assert "setInterval(loadDashboard" not in html
 
 
 @pytest.mark.parametrize("token", [None, "wrong-token"])
@@ -293,6 +320,208 @@ def test_duplicate_event_id_is_idempotent(
         ).fetchone()[0]
 
     assert count == 1
+
+
+def test_realtime_alerts_use_a_cursor_without_replaying_history(
+    client: TestClient,
+    agent_headers: dict[str, str],
+) -> None:
+    historical = post_log(
+        client,
+        agent_headers,
+        make_log_payload("alert-historical", ai_score=0.95, action_taken="BLOCKED"),
+    )
+
+    baseline = client.get("/api/v1/alerts")
+    assert baseline.status_code == 200
+    baseline_result = baseline.json()
+    assert baseline_result["items"] == []
+    assert baseline_result["count"] == 0
+    assert baseline_result["next_cursor"] == historical["log_id"]
+    assert baseline_result["cursor_epoch"]
+    assert baseline_result["cursor_reset"] is False
+
+    post_log(
+        client,
+        agent_headers,
+        make_log_payload("alert-low-risk", ai_score=0.40, action_taken="ALLOWED"),
+    )
+    blocked = post_log(
+        client,
+        agent_headers,
+        make_log_payload(
+            "alert-usb-blocked",
+            leak_channel="USB_COPY",
+            ai_score=0.60,
+            action_taken="BLOCKED",
+        ),
+    )
+    scored = post_log(
+        client,
+        agent_headers,
+        make_log_payload(
+            "alert-high-score",
+            leak_channel="CLOUD_DRIVE",
+            ai_score=0.90,
+            action_taken="WARNED",
+        ),
+    )
+    latest_low_risk = post_log(
+        client,
+        agent_headers,
+        make_log_payload("alert-latest-low", ai_score=0.20, action_taken="WARNED"),
+    )
+
+    response = client.get(
+        "/api/v1/alerts",
+        params={
+            "after_log_id": historical["log_id"],
+            "cursor_epoch": baseline_result["cursor_epoch"],
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["count"] == 2
+    assert result["next_cursor"] == latest_low_risk["log_id"]
+    assert result["cursor_epoch"] == baseline_result["cursor_epoch"]
+    assert [item["log_id"] for item in result["items"]] == [
+        blocked["log_id"],
+        scored["log_id"],
+    ]
+    assert result["items"][0]["leak_channel"] == "USB_COPY"
+    assert result["items"][0]["action_taken"] == "BLOCKED"
+
+    empty = client.get(
+        "/api/v1/alerts",
+        params={
+            "after_log_id": result["next_cursor"],
+            "cursor_epoch": result["cursor_epoch"],
+        },
+    )
+    assert empty.status_code == 200
+    assert empty.json()["items"] == []
+    assert empty.json()["next_cursor"] == latest_low_risk["log_id"]
+    assert empty.json()["cursor_reset"] is False
+
+
+def test_realtime_alert_cursor_recovers_after_database_reset(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    temp_db_path: Path,
+) -> None:
+    previous = post_log(
+        client,
+        agent_headers,
+        make_log_payload("alert-before-reset", action_taken="BLOCKED"),
+    )
+    previous_baseline = client.get("/api/v1/alerts").json()
+
+    temp_db_path.unlink()
+    main.init_db()
+
+    blocked = post_log(
+        client,
+        agent_headers,
+        make_log_payload(
+            "alert-reset-usb-blocked",
+            ai_score=0.60,
+            action_taken="BLOCKED",
+        ),
+    )
+    scored = post_log(
+        client,
+        agent_headers,
+        make_log_payload(
+            "alert-reset-high-score",
+            ai_score=0.90,
+            action_taken="WARNED",
+        ),
+    )
+    latest_low_risk = post_log(
+        client,
+        agent_headers,
+        make_log_payload(
+            "alert-reset-low-risk",
+            ai_score=0.20,
+            action_taken="ALLOWED",
+        ),
+    )
+    assert blocked["log_id"] == previous["log_id"]
+
+    reset = client.get(
+        "/api/v1/alerts",
+        params={
+            "after_log_id": previous["log_id"],
+            "cursor_epoch": previous_baseline["cursor_epoch"],
+        },
+    )
+
+    assert reset.status_code == 200
+    reset_result = reset.json()
+    assert [item["log_id"] for item in reset_result["items"]] == [
+        blocked["log_id"],
+        scored["log_id"],
+    ]
+    assert latest_low_risk["log_id"] not in {
+        item["log_id"] for item in reset_result["items"]
+    }
+    assert reset_result["next_cursor"] == latest_low_risk["log_id"]
+    assert reset_result["cursor_epoch"] != previous_baseline["cursor_epoch"]
+    assert reset_result["cursor_reset"] is True
+
+    caught_up = client.get(
+        "/api/v1/alerts",
+        params={
+            "after_log_id": reset_result["next_cursor"],
+            "cursor_epoch": reset_result["cursor_epoch"],
+        },
+    ).json()
+
+    assert caught_up["items"] == []
+    assert caught_up["next_cursor"] == latest_low_risk["log_id"]
+    assert caught_up["cursor_epoch"] == reset_result["cursor_epoch"]
+    assert caught_up["cursor_reset"] is False
+
+
+def test_realtime_alert_cursor_paginates_without_skipping(
+    client: TestClient,
+    agent_headers: dict[str, str],
+) -> None:
+    baseline = client.get("/api/v1/alerts").json()
+    created = [
+        post_log(
+            client,
+            agent_headers,
+            make_log_payload(f"alert-page-{index}", action_taken="BLOCKED"),
+        )
+        for index in range(3)
+    ]
+
+    first = client.get(
+        "/api/v1/alerts",
+        params={
+            "after_log_id": baseline["next_cursor"],
+            "cursor_epoch": baseline["cursor_epoch"],
+            "limit": 2,
+        },
+    ).json()
+    second = client.get(
+        "/api/v1/alerts",
+        params={
+            "after_log_id": first["next_cursor"],
+            "cursor_epoch": first["cursor_epoch"],
+            "limit": 2,
+        },
+    ).json()
+
+    assert [item["log_id"] for item in first["items"]] == [
+        created[0]["log_id"],
+        created[1]["log_id"],
+    ]
+    assert first["next_cursor"] == created[1]["log_id"]
+    assert [item["log_id"] for item in second["items"]] == [created[2]["log_id"]]
+    assert second["next_cursor"] == created[2]["log_id"]
 
 
 @pytest.mark.parametrize(

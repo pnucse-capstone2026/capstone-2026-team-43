@@ -9,6 +9,7 @@ Host Agent가 전송한 민감정보 반출 탐지 로그를 저장하고, 관�
 - 탐지 로그 검색, 필터, 목록 및 상세 조회
 - 최근 7일 KPI, 탐지 추이, 채널 분포, 부서별 위험도 시각화
 - 고위험 이벤트와 Evidence 상세 분석
+- `log_id` 커서 기반 2초 주기 준실시간 위험 알림과 선택형 경고음
 - Mock AI 분석 및 외부 AI 서버 전달 구조
 - 정책 조회·생성 API
 
@@ -126,12 +127,36 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --env-file .env
 | `GET` | `/api/v1/logs/filter-options` | 불필요 | 부서·사용자·Agent 필터 목록 조회 |
 | `GET` | `/api/v1/logs/{log_id}` | 불필요 | 개별 로그 상세 조회 |
 | `GET` | `/api/v1/dashboard/summary` | 불필요 | 최근 기간 KPI와 차트 데이터 조회 |
+| `GET` | `/api/v1/alerts` | 불필요 | 고위험 신규 로그를 `log_id` 커서로 조회 |
 | `GET` | `/api/v1/policies` | 불필요 | 정책 목록 조회 |
 | `POST` | `/api/v1/policies` | 현재 불필요 | 정책 생성 |
 
 정확한 요청 필드와 허용값은 실행 중인 서버의 `/docs`에서 확인할 수 있습니다.
 
-### 6.1 Agent 로그 연동 규칙
+### 6.1 준실시간 위험 알림
+
+대시보드를 열면 현재 최신 `log_id`를 기준선으로 저장한 뒤 2초마다 신규 고위험 로그를 조회합니다. 기존 이력은 토스트로 재생하지 않고, 화면을 연 뒤 저장된 다음 조건의 이벤트만 알립니다.
+
+- `action_taken == BLOCKED`
+- `ai_score >= 0.85`
+
+신규 이벤트가 있으면 우측 상단에 빨간 위험 알림이 표시되고, `상세 로그 보기`로 해당 `log_id`의 분석 화면을 열 수 있습니다. 경고음은 브라우저 자동 재생 정책 때문에 기본으로 꺼져 있으며, 상단의 `경고음 꺼` 버튼을 사용자가 한 번 눌러야 켜집니다.
+
+커서 API 동작:
+
+- 첫 요청에서 `after_log_id`를 생략하면 `items` 없이 현재
+  `next_cursor`와 SQLite 세대 ID인 `cursor_epoch`를 반환
+- 이후 `after_log_id=<next_cursor>&cursor_epoch=<cursor_epoch>`로
+  오름차순 신규 위험 이벤트 조회
+- 한 번에 20건, 최대 100건을 반환하며 잔여 건은 다음 커서 요청에서 이어서 조회
+- SQLite가 재생성되어 세대 ID가 달라지면 `cursor_reset: true`와 함께
+  새 DB에 이미 저장된 고위험 이벤트부터 다시 전달
+- 5초 타임아웃과 최대 30초 재시도 지연, 백그라운드 탭 중지로 불필요한 중복 요청 방지
+- 탭이 다시 표시되면 저장한 커서 이후 이벤트를 즉시 조회
+
+이 기능은 WebSocket이나 SSE가 아닌 HTTP 폴링 방식입니다. 화면에는 `실시간 알림`으로 표시하지만 정확한 기술 범위는 약 2초 지연의 시연용 준실시간 알림입니다.
+
+### 6.2 Agent 로그 연동 규칙
 
 - 요청 헤더: `X-Agent-Token: <AGENT_API_TOKEN>`
 - `timestamp`: UTC offset을 포함한 ISO 8601 형식 권장
@@ -148,7 +173,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --env-file .env
 python scripts/send_sample_log.py --scenario web_upload --dry-run
 ```
 
-### 6.2 로그 수집 요청 데이터 구조
+### 6.3 로그 수집 요청 데이터 구조
 
 Host Agent는 `POST /api/v1/logs`로 탐지 결과를 전송합니다. 요청 헤더에는 서버의 `AGENT_API_TOKEN`과 동일한 `X-Agent-Token`을 포함해야 합니다.
 
@@ -224,7 +249,7 @@ Host Agent는 `POST /api/v1/logs`로 탐지 결과를 전송합니다. 요청 �
 }
 ```
 
-### 6.3 AI 분석 요청·응답 구조
+### 6.4 AI 분석 요청·응답 구조
 
 Host Agent가 웹 서버의 분석 중계 API를 사용할 경우 `POST /api/v1/analyze`를 호출합니다. `AI_SERVER_URL`이 비어 있으면 Mock 분석 결과를 반환하고, 값이 있으면 동일 요청을 외부 AI 서버로 전달합니다.
 
@@ -293,7 +318,7 @@ Agent가 분석 결과를 로그 저장 필드로 변환할 때 사용하는 규
 
 외부 AI 서버는 `confidence_score` 대신 `ai_score` 또는 `score`를 반환할 수 있습니다. `1` 초과 `100` 이하의 점수는 웹 서버가 `0.0`~`1.0` 범위로 변환합니다.
 
-### 6.4 SQLite 데이터 구조
+### 6.5 SQLite 데이터 구조
 
 SQLite 파일은 `backend/dlp_dashboard.db`에 생성되지만 Git에는 포함하지 않습니다. 팀원 간 데이터 연동은 DB 파일을 공유하지 않고 위 REST API 계약을 기준으로 합니다.
 
@@ -343,7 +368,14 @@ SQLite 파일은 `backend/dlp_dashboard.db`에 생성되지만 Git에는 포함�
 | `is_active` | INTEGER | 활성 상태, `0` 또는 `1` |
 | `exception_extensions` | TEXT | 예외 확장자 배열을 쉼표로 연결해 저장 |
 
-### 6.5 주요 HTTP 상태 코드
+`dlp_metadata` 테이블:
+
+| 컬럼 | SQLite 타입 | 제약 및 설명 |
+| --- | --- | --- |
+| `metadata_key` | TEXT | Primary Key. 현재 `database_epoch` 사용 |
+| `metadata_value` | TEXT | DB 생성 시 발급한 UUID. 알림 커서의 DB 세대 식별자 |
+
+### 6.6 주요 HTTP 상태 코드
 
 | 상태 코드 | 발생 조건 |
 | --- | --- |
@@ -501,6 +533,8 @@ python -m pytest -q
 - 동일 `event_id` 재전송 중복 방지
 - 로그 입력값 검증과 조합 필터
 - 최근 기간 KPI, 차트 데이터와 날짜 경계
+- 고위험 알림 초기 기준선, 저위험 제외, 커서 페이징과 DB 세대 ID 기반 재생성 복구
+- 알림 UI·2초 폴링·전체 대시보드 반복 로드 금지 정적 계약
 - 정책 생성과 임계치 검증
 - 외부 AI 호출, 응답 정규화와 연결 실패 처리
 - 데모 seed 데이터 분포, 멱등성 및 대시보드 통계 반영
@@ -534,12 +568,30 @@ python -c "from urllib.request import urlopen; print(urlopen('http://127.0.0.1:8
 python -c "from fastapi.testclient import TestClient; print('TestClient ready')"
 ```
 
+준실시간 USB 위험 알림을 수동으로 확인하려면 다음 순서를 사용합니다.
+
+1. 서버를 실행하고 `/dashboard`를 먼저 열어 초기 커서를 준비합니다.
+2. 소리가 필요하면 상단 `경고음 꺼`를 눌러 `켬`으로 바꿉니다.
+3. Host Agent에서 USB 반출을 시도하거나 다음 Web 샘플을 전송합니다.
+
+```bash
+python scripts/send_sample_log.py --scenario usb_copy --event-id presentation-usb-alert-001
+```
+
+4. 정상이면 약 2초 안에 USB 반출 위험 토스트가 뜨고 요약 KPI만 갱신됩니다.
+5. `상세 로그 보기`로 해당 로그를 열고, 기존 필터·페이지·선택 상태가 폴링 때문에 초기화되지 않는지 확인합니다.
+
+같은 `event_id`를 다시 전송하면 서버가 기존 `log_id`를 반환하므로 새 알림이 반복되지 않습니다. 다시 시연하려면 고유한 `event_id`를 사용합니다.
+
 ## 11. 현재 제한사항
 
 - 실제 Host Agent와 AI 서버의 최종 E2E 통합은 아직 진행 전입니다.
 - 관리자 로그인과 역할 기반 접근 제어가 없습니다.
 - 정책 UI는 제거된 상태이며 정책 수정·삭제 API는 없습니다.
 - 데이터 저장소는 SQLite이며 운영 DB 전환은 진행 전입니다.
+- 서버 배포에서 SQLite를 유지하려면 `backend/dlp_dashboard.db`가 있는 경로를 영구 볼륨에 보존하고 단일 Web 프로세스로 실행해야 합니다.
+- 위험 알림은 WebSocket/SSE가 아닌 약 2초 주기 HTTP 폴링이며, 화면이 열려 있는 시연·프로토타입 범위입니다.
+- Host Agent의 `BLOCKED`는 차단 판정과 조치 시도를 뜻하며, USB 파일 삭제 성공 여부는 현재 로그 계약에 별도 필드로 포함되지 않습니다.
 - 로그 페이지네이션은 프론트에서 최대 200건을 받아 10건씩 표시하는 방식입니다.
 - 차트는 Chart.js CDN을 사용하므로 완전한 오프라인 환경에서는 표시되지 않을 수 있습니다.
 

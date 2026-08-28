@@ -1082,6 +1082,8 @@
                             <option value="EMAIL_ATTACHMENT">EMAIL_ATTACHMENT</option>
                             <option value="PRINT">PRINT</option>
                             <option value="MESSENGER">MESSENGER</option>
+                            <option value="CLIPBOARD">CLIPBOARD</option>
+                            <option value="CLOUD_DRIVE">CLOUD_DRIVE</option>
                         </select>
                         <select id="departmentFilter" class="control">
                             <option value="">전체 부서</option>
@@ -1168,7 +1170,10 @@
                 labels: [],
                 datasets: [{
                     data: [],
-                    backgroundColor: ["#2563eb", "#0ea5e9", "#16a34a", "#d97706", "#dc2626"],
+                    backgroundColor: [
+                        "#2563eb", "#0ea5e9", "#16a34a", "#d97706",
+                        "#dc2626", "#7c3aed", "#0891b2"
+                    ],
                     borderWidth: 0
                 }]
             },
@@ -1342,6 +1347,7 @@
             const filePath = item.file_path || "-";
             const processName = item.process_name || "-";
             const policyId = item.policy_id || "-";
+            const modelVersion = item.model_version || "-";
             const latency = item.latency_ms ?? "-";
             const latencyText = latency === "-" ? "-" : `${Number(latency).toLocaleString("ko-KR")} ms`;
 
@@ -1382,6 +1388,10 @@
                         <div class="detail-item">
                             <div class="detail-label">탐지 방식 / AI 점수</div>
                             <div class="detail-value">${escapeHtml(item.detection_type)} · ${Number(item.ai_score).toFixed(2)}</div>
+                        </div>
+                        <div class="detail-item">
+                            <div class="detail-label">AI 모델 버전</div>
+                            <div class="detail-value">${escapeHtml(modelVersion)}</div>
                         </div>
                         <div class="detail-item">
                             <div class="detail-label">응답 지연</div>

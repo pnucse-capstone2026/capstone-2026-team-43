@@ -100,6 +100,38 @@ SCENARIOS = {
         "evidence_summary": "Internal roadmap shared through messenger under monitoring threshold.",
         "latency_ms": 109,
     },
+    "clipboard": {
+        "department": "R&D",
+        "user_id": "research_user",
+        "file_name": "clipboard_content",
+        "file_path": None,
+        "process_name": "chrome.exe",
+        "leak_channel": "CLIPBOARD",
+        "detection_type": "HYBRID",
+        "ai_score": 0.72,
+        "matched_keywords": ["confidential", "prototype"],
+        "policy_id": "DLP-CLIP-006",
+        "action_taken": "WARNED",
+        "decision_reason": "Clipboard content requires a warning before external paste.",
+        "evidence_summary": "Sensitive prototype context was detected in clipboard text.",
+        "latency_ms": 78,
+    },
+    "cloud_drive": {
+        "department": "Finance",
+        "user_id": "finance_user",
+        "file_name": "forecast_backup.xlsx",
+        "file_path": r"C:\Users\finance_user\Documents\forecast_backup.xlsx",
+        "process_name": "chrome.exe",
+        "leak_channel": "CLOUD_DRIVE",
+        "detection_type": "HYBRID",
+        "ai_score": 0.89,
+        "matched_keywords": ["forecast", "confidential"],
+        "policy_id": "DLP-CLOUD-007",
+        "action_taken": "BLOCKED",
+        "decision_reason": "Confidential forecast upload to cloud storage was blocked.",
+        "evidence_summary": "A finance forecast was detected in a cloud drive upload.",
+        "latency_ms": 136,
+    },
 }
 
 ANALYZE_SCENARIOS = {
@@ -133,6 +165,18 @@ ANALYZE_SCENARIOS = {
         "dest": "internal",
         "severity_hint": "low",
     },
+    "clipboard": {
+        "channel": "clipboard",
+        "snippet": "Confidential prototype notes copied for an external browser paste.",
+        "dest": "external",
+        "severity_hint": "medium",
+    },
+    "cloud_drive": {
+        "channel": "drive_upload",
+        "snippet": "Confidential finance forecast uploaded to an external cloud drive.",
+        "dest": "external",
+        "severity_hint": "high",
+    },
 }
 
 
@@ -157,6 +201,11 @@ def build_sample_payload(
         "host_ip": "192.168.10.42",
         "hostname": "host-agent-demo-01",
         **scenario_payload,
+        "model_version": (
+            None
+            if scenario_payload["detection_type"] == "RULE_BASED"
+            else "koelectra-dlp-v7"
+        ),
     }
 
 
@@ -183,6 +232,7 @@ def apply_analysis_result(log_payload: dict, analysis_result: dict) -> dict:
     log_payload["action_taken"] = DECISION_TO_ACTION[decision]
     log_payload["detection_type"] = "HYBRID"
     log_payload["latency_ms"] = analysis_result["latency_ms"]
+    log_payload["model_version"] = analysis_result["model_version"]
     log_payload["decision_reason"] = (
         f"Mock AI decision={decision}, model={analysis_result['model_version']}."
     )

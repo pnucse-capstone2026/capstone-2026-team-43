@@ -248,6 +248,11 @@ def build_demo_logs(base_date: date | None = None) -> list[dict]:
                 "host_ip": f"192.168.10.{40 + sequence}",
                 "hostname": f"demo-host-{sequence:02d}",
                 **{key: value for key, value in scenario.items() if key != "day_offset"},
+                "model_version": (
+                    None
+                    if scenario["detection_type"] == "RULE_BASED"
+                    else "koelectra-dlp-v7"
+                ),
             }
         )
 
@@ -279,8 +284,9 @@ def seed_demo_data(db_path: Path, base_date: date | None = None) -> dict:
                     event_id, agent_id, timestamp, received_at, host_ip, hostname,
                     user_id, department, file_name, file_path, process_name,
                     leak_channel, detection_type, ai_score, matched_keywords,
-                    policy_id, action_taken, decision_reason, evidence_summary, latency_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    model_version, policy_id, action_taken, decision_reason,
+                    evidence_summary, latency_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     log.event_id,
@@ -298,6 +304,7 @@ def seed_demo_data(db_path: Path, base_date: date | None = None) -> dict:
                     log.detection_type,
                     log.ai_score,
                     ",".join(log.matched_keywords),
+                    log.model_version,
                     log.policy_id,
                     log.action_taken,
                     log.decision_reason,

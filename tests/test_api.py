@@ -24,6 +24,7 @@ def make_log_payload(
     leak_channel: str = "USB_COPY",
     detection_type: str = "HYBRID",
     ai_score: float = 0.91,
+    model_version: str | None = "koelectra-dlp-v7",
     action_taken: str = "BLOCKED",
 ) -> dict:
     return {
@@ -40,6 +41,7 @@ def make_log_payload(
         "leak_channel": leak_channel,
         "detection_type": detection_type,
         "ai_score": ai_score,
+        "model_version": model_version,
         "matched_keywords": ["confidential", "forecast"],
         "policy_id": "DLP-TEST-001",
         "action_taken": action_taken,
@@ -49,10 +51,14 @@ def make_log_payload(
     }
 
 
-def make_analyze_payload(event_id: str = "analyze-test-001") -> dict:
+def make_analyze_payload(
+    event_id: str = "analyze-test-001",
+    *,
+    channel: str = "web_upload",
+) -> dict:
     return {
         "event_id": event_id,
-        "channel": "web_upload",
+        "channel": channel,
         "user_id": "researcher",
         "matched_patterns": ["source_code", "api_key"],
         "snippet": "Confidential source_code archive includes an API key.",
@@ -64,6 +70,21 @@ def post_log(client: TestClient, headers: dict[str, str], payload: dict) -> dict
     response = client.post("/api/v1/logs", json=payload, headers=headers)
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def assert_host_response_contract(result: dict, event_id: str) -> None:
+    """Mirror the strict fields consumed by Host Agent's ResponseParser."""
+    assert result["event_id"] == event_id
+    assert result["decision"] in {"allow", "review", "block"}
+    assert isinstance(result["confidence_score"], (int, float))
+    assert not isinstance(result["confidence_score"], bool)
+    assert 0.0 <= result["confidence_score"] <= 1.0
+    assert isinstance(result["model_version"], str)
+    assert result["model_version"].strip()
+    assert isinstance(result["latency_ms"], (int, float))
+    assert not isinstance(result["latency_ms"], bool)
+    assert result["latency_ms"] >= 0
+    assert isinstance(result["reason"], str)
 
 
 def test_startup_creates_only_the_temporary_database(
@@ -88,6 +109,40 @@ def test_startup_creates_only_the_temporary_database(
     assert policy_count == 2
 
 
+def test_log_schema_migration_adds_model_version_to_existing_database() -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute(
+            """
+            CREATE TABLE dlp_logs (
+                log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT,
+                timestamp TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO dlp_logs (event_id, timestamp) VALUES (?, ?)",
+            ("legacy-event", "2026-08-13T00:00:00+00:00"),
+        )
+
+        main.ensure_log_schema(connection.cursor())
+        main.ensure_log_schema(connection.cursor())
+
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(dlp_logs)").fetchall()
+        }
+        assert "model_version" in columns
+        legacy_row = connection.execute(
+            "SELECT event_id, model_version FROM dlp_logs"
+        ).fetchone()
+        assert tuple(legacy_row) == ("legacy-event", None)
+    finally:
+        connection.close()
+
+
 def test_health_and_frontend_routes(client: TestClient) -> None:
     health = client.get("/health")
 
@@ -100,6 +155,9 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
         response = client.get(path)
         assert response.status_code == 200
         assert "AI 기반 Host DLP 시스템" in response.text
+        assert 'value="CLIPBOARD"' in response.text
+        assert 'value="CLOUD_DRIVE"' in response.text
+        assert "AI 모델 버전" in response.text
 
 
 @pytest.mark.parametrize("token", [None, "wrong-token"])
@@ -143,7 +201,31 @@ def test_mock_analysis_returns_a_normalized_decision(
     assert 0.85 <= result["confidence_score"] <= 1.0
     assert result["model_version"] == main.MOCK_MODEL_VERSION
     assert result["latency_ms"] >= 1
+    assert "api_key" in result["reason"]
     assert "api_key" in result["evidence_summary"]
+    assert result["reason"] == result["evidence_summary"]
+    assert_host_response_contract(result, "analyze-test-001")
+
+
+@pytest.mark.parametrize("channel", ["smtp", "web_mail", "file_guard"])
+def test_host_agent_channels_are_accepted_with_reason(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    channel: str,
+) -> None:
+    event_id = f"host-channel-{channel}"
+    response = client.post(
+        "/api/v1/analyze",
+        json=make_analyze_payload(event_id, channel=channel),
+        headers=agent_headers,
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["reason"]
+    assert result["evidence_summary"] == result["reason"]
+    assert f"channel:{channel}" in result["reason"]
+    assert_host_response_contract(result, event_id)
 
 
 def test_log_create_detail_and_database_persistence(
@@ -163,14 +245,29 @@ def test_log_create_detail_and_database_persistence(
     assert detail["event_id"] == payload["event_id"]
     assert detail["file_path"] == payload["file_path"]
     assert detail["matched_keywords"] == payload["matched_keywords"]
+    assert detail["model_version"] == payload["model_version"]
     assert detail["received_at"] is not None
 
     with sqlite3.connect(temp_db_path) as connection:
         stored = connection.execute(
-            "SELECT event_id, action_taken, ai_score FROM dlp_logs"
+            "SELECT event_id, action_taken, ai_score, model_version FROM dlp_logs"
         ).fetchone()
 
-    assert stored == ("event-create-001", "BLOCKED", 0.91)
+    assert stored == ("event-create-001", "BLOCKED", 0.91, "koelectra-dlp-v7")
+
+
+def test_log_model_version_is_optional(
+    client: TestClient,
+    agent_headers: dict[str, str],
+) -> None:
+    payload = make_log_payload("event-without-model")
+    payload.pop("model_version")
+
+    created = post_log(client, agent_headers, payload)
+    detail = client.get(f"/api/v1/logs/{created['log_id']}")
+
+    assert detail.status_code == 200
+    assert detail.json()["model_version"] is None
 
 
 def test_duplicate_event_id_is_idempotent(
@@ -203,7 +300,7 @@ def test_duplicate_event_id_is_idempotent(
     [
         ("ai_score", 1.1),
         ("action_taken", "UNKNOWN"),
-        ("leak_channel", "CLOUD_DRIVE"),
+        ("leak_channel", "UNKNOWN_CHANNEL"),
     ],
 )
 def test_log_payload_validation(
@@ -218,6 +315,30 @@ def test_log_payload_validation(
     response = client.post("/api/v1/logs", json=payload, headers=agent_headers)
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("leak_channel", ["CLIPBOARD", "CLOUD_DRIVE"])
+def test_log_accepts_integration_channels(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    leak_channel: str,
+) -> None:
+    payload = make_log_payload(
+        f"integration-{leak_channel.lower()}",
+        leak_channel=leak_channel,
+    )
+
+    created = post_log(client, agent_headers, payload)
+    detail = client.get(f"/api/v1/logs/{created['log_id']}")
+
+    assert detail.status_code == 200
+    assert detail.json()["leak_channel"] == leak_channel
+    assert detail.json()["model_version"] == "koelectra-dlp-v7"
+
+    filtered = client.get("/api/v1/logs", params={"leak_channel": leak_channel})
+    assert filtered.status_code == 200
+    assert filtered.json()["count"] == 1
+    assert filtered.json()["items"][0]["event_id"] == payload["event_id"]
 
 
 def test_log_filters_and_filter_options(
@@ -291,6 +412,7 @@ def test_log_filters_and_filter_options(
     assert option_data["departments"] == ["Finance", "Legal", "R&D"]
     assert option_data["users"] == ["finance_user", "legal_user", "research_user"]
     assert option_data["agents"] == ["agent-finance", "agent-legal", "agent-research"]
+    assert option_data["leak_channels"] == main.LEAK_CHANNELS
 
 
 def test_dashboard_summary_uses_only_the_requested_recent_period(
@@ -441,18 +563,22 @@ class FakeExternalResponse:
         return self.body
 
 
+@pytest.mark.parametrize("channel", ["smtp", "web_mail", "file_guard"])
 def test_external_ai_response_is_forwarded_and_normalized(
     client: TestClient,
     agent_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
+    channel: str,
 ) -> None:
     captured: dict[str, object] = {}
+    event_id = f"external-ai-{channel}"
 
     def fake_urlopen(request: object, timeout: float) -> FakeExternalResponse:
         captured["request"] = request
         captured["timeout"] = timeout
         return FakeExternalResponse(
             {
+                "event_id": event_id,
                 "decision": "REVIEW",
                 "score": 73,
                 "model_version": "team-ai-v1",
@@ -466,38 +592,133 @@ def test_external_ai_response_is_forwarded_and_normalized(
     monkeypatch.setattr(main, "AI_SERVER_TIMEOUT_SECONDS", 2.5)
     monkeypatch.setattr(main, "urlopen", fake_urlopen)
 
+    payload = make_analyze_payload(event_id, channel=channel)
     response = client.post(
         "/api/v1/analyze",
-        json=make_analyze_payload("external-ai-001"),
+        json=payload,
         headers=agent_headers,
     )
 
     assert response.status_code == 200
     assert response.json() == {
-        "event_id": "external-ai-001",
+        "event_id": event_id,
         "decision": "review",
         "confidence_score": 0.73,
         "model_version": "team-ai-v1",
         "latency_ms": 125,
+        "reason": "External model detected sensitive context.",
         "evidence_summary": "External model detected sensitive context.",
     }
     request = captured["request"]
     assert request.full_url == "http://team-ai.local/api/v1/analyze"
     assert request.get_header("Authorization") == "Bearer team-ai-token"
+    assert json.loads(request.data.decode("utf-8")) == payload
     assert captured["timeout"] == 2.5
+    assert_host_response_contract(response.json(), event_id)
 
     health = client.get("/health").json()
     assert health["analysis_mode"] == "external"
     assert health["ai_server_url_configured"] is True
 
 
+def test_external_evidence_summary_is_preserved_and_used_as_reason() -> None:
+    payload = main.AnalyzeRequest.model_validate(make_analyze_payload("external-evidence"))
+
+    result = main.normalize_external_analyze_response(
+        payload,
+        {
+            "event_id": "external-evidence",
+            "decision": "allow",
+            "confidence_score": 0.23,
+            "model_version": "team-ai-v2",
+            "latency_ms": 18,
+            "evidence_summary": "No high-risk context was detected.",
+        },
+        latency_ms=20,
+    )
+
+    assert result["reason"] == "No high-risk context was detected."
+    assert result["evidence_summary"] == "No high-risk context was detected."
+    assert_host_response_contract(result, "external-evidence")
+
+
+@pytest.mark.parametrize(
+    ("external_payload", "expected_detail"),
+    [
+        (
+            {
+                "event_id": "different-event-id",
+                "decision": "allow",
+                "confidence_score": 0.2,
+                "model_version": "team-ai-v1",
+            },
+            "event_id does not match",
+        ),
+        (
+            {
+                "event_id": "analyze-test-001",
+                "decision": "allow",
+                "confidence_score": 0.2,
+            },
+            "model_version",
+        ),
+        (
+            {
+                "event_id": "analyze-test-001",
+                "decision": "allow",
+                "confidence_score": 0.2,
+                "model_version": "   ",
+            },
+            "model_version",
+        ),
+    ],
+)
+def test_external_ai_identity_contract_violations_return_502(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    external_payload: dict,
+    expected_detail: str,
+) -> None:
+    monkeypatch.setattr(main, "AI_SERVER_URL", "http://team-ai.local")
+    monkeypatch.setattr(
+        main,
+        "urlopen",
+        lambda request, timeout: FakeExternalResponse(external_payload),
+    )
+
+    response = client.post(
+        "/api/v1/analyze",
+        json=make_analyze_payload(),
+        headers=agent_headers,
+    )
+
+    assert response.status_code == 502
+    assert expected_detail in response.json()["detail"]
+
+
 @pytest.mark.parametrize(
     "external_payload",
     [
         [],
-        {"decision": "unknown", "confidence_score": 0.5},
-        {"decision": "allow", "confidence_score": 101},
-        {"decision": "block", "confidence_score": "not-a-number"},
+        {
+            "event_id": "analyze-test-001",
+            "decision": "unknown",
+            "confidence_score": 0.5,
+            "model_version": "team-ai-v1",
+        },
+        {
+            "event_id": "analyze-test-001",
+            "decision": "allow",
+            "confidence_score": 101,
+            "model_version": "team-ai-v1",
+        },
+        {
+            "event_id": "analyze-test-001",
+            "decision": "block",
+            "confidence_score": "not-a-number",
+            "model_version": "team-ai-v1",
+        },
     ],
 )
 def test_invalid_external_ai_responses_return_502(

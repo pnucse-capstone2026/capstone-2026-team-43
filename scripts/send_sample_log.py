@@ -14,6 +14,7 @@ DEFAULT_API_URL = "http://127.0.0.1:8000/api/v1/logs"
 DEFAULT_ANALYZE_URL = "http://127.0.0.1:8000/api/v1/analyze"
 DEFAULT_AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "sentry-agent-demo-token")
 FIXTURE_MODEL_VERSION = "demo-fixture-not-live"
+ANALYZED_FIXTURE_MARKER = "[WEB FIXTURE - NOT HOST LIVE]"
 DECISION_TO_ACTION = {
     "allow": "ALLOWED",
     "review": "WARNED",
@@ -237,9 +238,12 @@ def apply_analysis_result(log_payload: dict, analysis_result: dict) -> dict:
     log_payload["detection_type"] = "HYBRID"
     log_payload["latency_ms"] = analysis_result["latency_ms"]
     log_payload["model_version"] = analysis_result["model_version"]
-    log_payload["decision_reason"] = analysis_result["reason"]
+    log_payload["decision_reason"] = (
+        f"{ANALYZED_FIXTURE_MARKER} {analysis_result['reason']}"
+    )
     log_payload["evidence_summary"] = (
-        analysis_result.get("evidence_summary") or analysis_result["reason"]
+        f"{ANALYZED_FIXTURE_MARKER} "
+        f"{analysis_result.get('evidence_summary') or analysis_result['reason']}"
     )
     return log_payload
 
@@ -284,7 +288,10 @@ def main() -> int:
         "--scenario",
         choices=["all", *SCENARIO_ORDER],
         default="web_upload",
-        help="Sample Host Agent event scenario to send. Use 'all' for all seven in presentation order.",
+        help=(
+            "Web display fixture to send. Use 'all' for all seven fixtures; "
+            "this does not mean Host Agent has seven independent detectors."
+        ),
     )
     parser.add_argument(
         "--count",
@@ -349,7 +356,10 @@ def main() -> int:
     payloads = [payload for _, payload in scenario_payloads]
 
     if args.analyze_first:
-        print("Base fixture payload before analysis:")
+        print(
+            "Web fixture payload before analysis. Any returned model result still "
+            "does not prove a live Host hook event."
+        )
     else:
         print("Demo fixture only: scores and actions below are predefined, not live analysis results.")
     print(json.dumps(payloads[0] if len(payloads) == 1 else payloads, ensure_ascii=False, indent=2))

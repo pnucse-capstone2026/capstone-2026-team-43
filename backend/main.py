@@ -536,6 +536,12 @@ async def health_check() -> dict:
     }
 
 
+@app.get("/api/v1/agent-check", dependencies=[Depends(verify_agent_token)])
+async def agent_connection_check() -> dict:
+    """Verify Agent authentication without creating a dashboard log."""
+    return {"status": "ok", "agent_token": "accepted"}
+
+
 @app.get("/dashboard")
 async def dashboard() -> FileResponse:
     if not FRONTEND_PATH.exists():

@@ -170,6 +170,26 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
         assert "AI 모델 버전" in response.text
 
 
+def test_agent_connection_check_verifies_token_without_creating_log(
+    client: TestClient,
+) -> None:
+    rejected = client.get("/api/v1/agent-check")
+    wrong_token = client.get(
+        "/api/v1/agent-check",
+        headers={"X-Agent-Token": "wrong-agent-token"},
+    )
+    accepted = client.get(
+        "/api/v1/agent-check",
+        headers={"X-Agent-Token": main.AGENT_API_TOKEN},
+    )
+
+    assert rejected.status_code == 401
+    assert wrong_token.status_code == 401
+    assert accepted.status_code == 200
+    assert accepted.json() == {"status": "ok", "agent_token": "accepted"}
+    assert client.get("/api/v1/logs").json()["count"] == 0
+
+
 def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
     html = client.get("/dashboard").text
 

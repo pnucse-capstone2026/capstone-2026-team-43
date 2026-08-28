@@ -44,7 +44,7 @@ def test_all_scenarios_are_sent_in_presentation_order(
     assert intervals == [0.25] * 6
 
 
-def test_fixture_provenance_is_replaced_by_analysis_result() -> None:
+def test_analyzed_fixture_keeps_non_host_provenance() -> None:
     payload = send_sample_log.build_sample_payload(
         "usb_copy",
         sequence=1,
@@ -68,8 +68,12 @@ def test_fixture_provenance_is_replaced_by_analysis_result() -> None:
 
     assert analyzed["action_taken"] == "WARNED"
     assert analyzed["model_version"] == "team-ai-v1"
-    assert analyzed["decision_reason"] == "External model requested review."
-    assert "DEMO FIXTURE" not in analyzed["evidence_summary"]
+    assert analyzed["decision_reason"] == (
+        "[WEB FIXTURE - NOT HOST LIVE] External model requested review."
+    )
+    assert analyzed["evidence_summary"] == (
+        "[WEB FIXTURE - NOT HOST LIVE] Sensitive context was detected."
+    )
 
 
 def test_analysis_reason_is_used_when_evidence_summary_is_absent() -> None:
@@ -90,4 +94,6 @@ def test_analysis_reason_is_used_when_evidence_summary_is_absent() -> None:
         },
     )
 
-    assert analyzed["evidence_summary"] == "Direct AI response reason."
+    assert analyzed["evidence_summary"] == (
+        "[WEB FIXTURE - NOT HOST LIVE] Direct AI response reason."
+    )

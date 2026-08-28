@@ -142,6 +142,7 @@ logging:
 | Method | Path | 토큰 | 용도 |
 | --- | --- | --- | --- |
 | `GET` | `/health` | 불필요 | 서버와 AI 분석 모드 확인 |
+| `GET` | `/api/v1/agent-check` | `X-Agent-Token` | 로그를 남기지 않고 Host 인증·연결 확인 |
 | `POST` | `/api/v1/analyze` | `X-Agent-Token` | Mock 또는 외부 AI 분석 요청 |
 | `POST` | `/api/v1/logs` | `X-Agent-Token` | Host Agent 탐지 로그 저장 |
 | `GET` | `/api/v1/logs` | 불필요 | 로그 검색 및 필터 조회 |
@@ -329,13 +330,15 @@ Host Agent가 웹 서버의 분석 중계 API를 사용할 경우 `POST /api/v1/
 
 `reason`은 Host Agent 응답 파서가 직접 읽는 필수 호환 필드입니다. 기존 대시보드·로그 연동을 위해 `evidence_summary`도 함께 반환하며, 외부 AI가 둘 중 하나만 반환하면 웹 서버가 다른 필드를 같은 내용으로 채웁니다.
 
-Agent가 분석 결과를 로그 저장 필드로 변환할 때 사용하는 규칙:
+Web 분석 fixture가 AI 판정을 로그 필드로 바꿀 때 사용하는 기본 규칙:
 
 | AI `decision` | 로그 `action_taken` |
 | --- | --- |
 | `allow` | `ALLOWED` |
 | `review` | `WARNED` |
 | `block` | `BLOCKED` |
+
+실제 Host Agent는 이 표를 그대로 확정 결과로 쓰지 않습니다. AI `block`이어도 USB 삭제 실패·파일 변경처럼 실제 차단을 확인하지 못하면 `WARNED`, AI `allow`·`review`여도 Clipboard 재발행에 실패하면 `WARNED`로 기록해 운영체제 조치 결과를 우선합니다.
 
 외부 AI 서버는 `confidence_score` 대신 `ai_score` 또는 `score`를 반환할 수 있습니다. `1` 초과 `100` 이하의 점수는 웹 서버가 `0.0`~`1.0` 범위로 변환합니다.
 
@@ -424,7 +427,7 @@ set +a
 python scripts/send_sample_log.py --scenario usb_copy
 ```
 
-지원 시나리오:
+Web 표시용 fixture 시나리오:
 
 - `web_upload`
 - `usb_copy`
@@ -442,7 +445,9 @@ python scripts/send_sample_log.py --scenario all --interval 2.5
 
 전송 순서는 `web_upload` → `usb_copy` → `email_attachment` → `print` → `messenger` → `clipboard` → `cloud_drive`입니다. `--interval`은 이벤트 간 대기 시간(초)이며, `--count 2`를 추가하면 전체 순서를 2회 반복합니다.
 
-`--analyze-first`가 없는 샘플의 AI 점수와 조치는 실제 탐지나 모델 결과가 아닌 미리 정한 fixture입니다. 이 경우 `model_version`은 `demo-fixture-not-live`, 판단 근거는 `DEMO FIXTURE - NOT LIVE`로 표시됩니다. Web 분석 중계에 연결된 AI 결과를 사용하려면 `--analyze-first`를 추가하고, 대시보드 상단의 `Web 분석` 모드가 `EXTERNAL`인지 확인합니다. `MOCK`이면 Web 내부 목 분석입니다. 이 표시는 Web의 `/api/v1/analyze`에만 해당하며, Host Agent가 AI 서버에 직접 연결한 이벤트의 실제 모델 여부는 로그 상세의 `model_version`과 `detection_type`으로 확인합니다.
+위 7개는 Web의 수집·필터·차트·상세 표시를 확인하는 fixture이며, Host Agent가 7개를 모두 독립적으로 탐지한다는 뜻이 아닙니다. 실제 Host 연동 대상은 `CLIPBOARD`, `USB_COPY`, `EMAIL_ATTACHMENT`, `WEB_UPLOAD`, `CLOUD_DRIVE` 5개입니다. 메신저 붙여넣기는 독립 `MESSENGER` 훅이 아니라 Clipboard 훅으로 검사하고 `CLIPBOARD` 채널로 기록합니다. `PRINT`는 Web 표시용 fixture만 있으며 현재 Host Agent에서 미지원입니다.
+
+`--analyze-first`가 없는 샘플의 AI 점수와 조치는 실제 탐지나 모델 결과가 아닌 미리 정한 fixture입니다. 이 경우 `model_version`은 `demo-fixture-not-live`, 판단 근거는 `DEMO FIXTURE - NOT LIVE`로 표시됩니다. Web 분석 중계에 연결된 AI 결과를 사용하려면 `--analyze-first`를 추가하고, 대시보드 상단의 `Web 분석` 모드가 `EXTERNAL`인지 확인합니다. 이때 실제 모델 응답을 사용하더라도 입력과 채널 발생 자체는 Web fixture이므로 판단 근거에는 `WEB FIXTURE - NOT HOST LIVE`가 유지됩니다. `MOCK`이면 Web 내부 목 분석입니다. 이 표시는 Web의 `/api/v1/analyze`에만 해당하며, Host Agent가 AI 서버에 직접 연결한 이벤트의 실제 모델 여부는 로그 상세의 `model_version`, `detection_type`, 판단 근거를 함께 확인합니다.
 
 모든 신규 이벤트는 KPI, 채널 차트와 최근 로그에 자동 반영됩니다. 경고 토스트와 경고음은 조치가 `BLOCKED`이거나 AI 점수가 `0.85` 이상인 고위험 이벤트에만 발생합니다.
 
@@ -605,7 +610,7 @@ python -c "from fastapi.testclient import TestClient; print('TestClient ready')"
 
 1. 서버를 실행하고 `/dashboard`를 먼저 열어 초기 커서를 준비합니다.
 2. 소리가 필요하면 상단 `경고음 꺼`를 눌러 `켬`으로 바꿉니다.
-3. Host Agent에서 실제 반출을 시도하거나 다음 Web fixture 7건을 순차 전송합니다.
+3. Host Agent에서 지원하는 5개 반출 경로를 실제로 시도하거나, 다음 Web 표시용 fixture 7건을 순차 전송합니다.
 
 ```bash
 python scripts/send_sample_log.py --scenario all --interval 2.5
@@ -624,8 +629,9 @@ python scripts/send_sample_log.py --scenario all --interval 2.5
 - 데이터 저장소는 SQLite이며 운영 DB 전환은 진행 전입니다.
 - 서버 배포에서 SQLite를 유지하려면 `backend/dlp_dashboard.db`가 있는 경로를 영구 볼륨에 보존하고 단일 Web 프로세스로 실행해야 합니다.
 - 위험 알림은 WebSocket/SSE가 아닌 약 2초 주기 HTTP 폴링이며, 화면이 열려 있는 시연·프로토타입 범위입니다.
-- `send_sample_log.py`는 Web 수집·표시 흐름을 확인하는 fixture 전송기이며, Windows의 USB·클립보드·이메일·인쇄 등을 실제로 감지하거나 차단하지 않습니다.
-- Host Agent의 `BLOCKED`는 차단 판정과 조치 시도를 뜻하며, USB 파일 삭제 성공 여부는 현재 로그 계약에 별도 필드로 포함되지 않습니다.
+- `send_sample_log.py --scenario all`은 `PRINT`·`MESSENGER`를 포함한 Web 표시용 fixture 7건을 전송할 뿐입니다. 실제 Host 연동은 5개 채널이며, 메신저는 `CLIPBOARD` 경로로 검사하고 `PRINT`는 미지원입니다.
+- `send_sample_log.py`는 Windows의 USB·클립보드·이메일 등을 실제로 감지하거나 차단하지 않습니다.
+- Host Agent의 USB `BLOCKED`는 대상 파일의 사후 삭제가 실제로 성공한 경우에만 기록합니다. 삭제 직전·도중 파일이 없어졌거나, 분석 뒤 파일 지문이 바뀌었거나, 권한·잠금·드라이브 이탈로 삭제를 확인할 수 없으면 다른 파일을 삭제하지 않고 `WARNED`와 실패 사유로 기록합니다.
 - 로그 페이지네이션은 프론트에서 최대 200건을 받아 10건씩 표시하는 방식입니다.
 - 차트는 Chart.js CDN을 사용하므로 완전한 오프라인 환경에서는 표시되지 않을 수 있습니다.
 

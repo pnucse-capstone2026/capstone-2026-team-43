@@ -116,6 +116,27 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --env-file .env
 
 `/health`의 `analysis_mode`가 `mock`이면 내부 Mock 분석, `external`이면 외부 AI 서버 전달 모드입니다.
 
+### 5.3 두 컴퓨터 시연
+
+두 컴퓨터가 같은 중앙 Web 서버를 사용해야 합니다. 서버 PC에서는 해당 PC의 LAN IP에 바인딩해 실행합니다.
+
+```bash
+python -m uvicorn backend.main:app --host <SERVER_LAN_IP> --port 8000 --env-file .env
+```
+
+대시보드 PC에서는 `http://<SERVER_LAN_IP>:8000/dashboard`를 열고 `경고음 꺼` 버튼을 눌러 경고음을 켭니다. Host Agent PC의 `config/settings.yaml`은 다음 항목을 같은 서버로 맞춥니다.
+
+```yaml
+server:
+  dashboard_url: "http://<SERVER_LAN_IP>:8000"
+  dashboard_token: "<AGENT_API_TOKEN과 동일한 값>"
+
+logging:
+  send_immediately: true
+```
+
+대시보드를 먼저 연 뒤 Host Agent에서 반출 시나리오를 실행하면, 새 `BLOCKED` 이벤트 또는 AI 점수 `0.85` 이상 이벤트가 약 2초 안에 다른 컴퓨터의 대시보드에 표시됩니다. 두 컴퓨터 사이에서 TCP 8000 포트 접근이 가능해야 하며, 공용 네트워크나 외부 서버에서는 HTTPS와 별도의 접근 제어를 사용합니다.
+
 ## 6. 주요 API
 
 | Method | Path | 토큰 | 용도 |

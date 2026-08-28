@@ -165,6 +165,8 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
         assert "AI 기반 Host DLP 시스템" in response.text
         assert 'value="CLIPBOARD"' in response.text
         assert 'value="CLOUD_DRIVE"' in response.text
+        assert 'id="analysisMode"' in response.text
+        assert "Web 분석" in response.text
         assert "AI 모델 버전" in response.text
 
 
@@ -177,14 +179,21 @@ def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
         'id="alertSoundToggle"',
         "const RISK_POLL_INTERVAL_MS = 2000",
         "function pollRealtimeRiskAlerts",
+        "async function refreshDashboardData()",
         'fetch(`/api/v1/alerts?',
         'query.set("cursor_epoch", riskAlertCursorEpoch)',
         "startRiskPolling();\n        loadDashboard();",
         "result.cursor_reset === true || cursorEpochChanged",
+        "const previousCursor = riskAlertCursor",
+        "const cursorAdvanced = previousCursor !== null",
+        "if (cursorAdvanced) {",
+        "refreshDashboardData().catch",
+        'setText("analysisMode", String(health.analysis_mode || "unknown").toUpperCase())',
     ):
         assert marker in html
 
     assert "setInterval(loadDashboard" not in html
+    assert html.index("if (cursorAdvanced) {") < html.index("if (items.length) {")
 
 
 @pytest.mark.parametrize("token", [None, "wrong-token"])

@@ -434,6 +434,18 @@ python scripts/send_sample_log.py --scenario usb_copy
 - `clipboard`
 - `cloud_drive`
 
+발표용으로 7개 시나리오를 위 순서대로 한 번씩 전송하려면 대시보드를 먼저 열고 다음을 실행합니다.
+
+```bash
+python scripts/send_sample_log.py --scenario all --interval 2.5
+```
+
+전송 순서는 `web_upload` → `usb_copy` → `email_attachment` → `print` → `messenger` → `clipboard` → `cloud_drive`입니다. `--interval`은 이벤트 간 대기 시간(초)이며, `--count 2`를 추가하면 전체 순서를 2회 반복합니다.
+
+`--analyze-first`가 없는 샘플의 AI 점수와 조치는 실제 탐지나 모델 결과가 아닌 미리 정한 fixture입니다. 이 경우 `model_version`은 `demo-fixture-not-live`, 판단 근거는 `DEMO FIXTURE - NOT LIVE`로 표시됩니다. Web 분석 중계에 연결된 AI 결과를 사용하려면 `--analyze-first`를 추가하고, 대시보드 상단의 `Web 분석` 모드가 `EXTERNAL`인지 확인합니다. `MOCK`이면 Web 내부 목 분석입니다. 이 표시는 Web의 `/api/v1/analyze`에만 해당하며, Host Agent가 AI 서버에 직접 연결한 이벤트의 실제 모델 여부는 로그 상세의 `model_version`과 `detection_type`으로 확인합니다.
+
+모든 신규 이벤트는 KPI, 채널 차트와 최근 로그에 자동 반영됩니다. 경고 토스트와 경고음은 조치가 `BLOCKED`이거나 AI 점수가 `0.85` 이상인 고위험 이벤트에만 발생합니다.
+
 중복 방지 확인:
 
 ```bash
@@ -589,18 +601,18 @@ python -c "from urllib.request import urlopen; print(urlopen('http://127.0.0.1:8
 python -c "from fastapi.testclient import TestClient; print('TestClient ready')"
 ```
 
-준실시간 USB 위험 알림을 수동으로 확인하려면 다음 순서를 사용합니다.
+준실시간 다중 시나리오 반영을 수동으로 확인하려면 다음 순서를 사용합니다.
 
 1. 서버를 실행하고 `/dashboard`를 먼저 열어 초기 커서를 준비합니다.
 2. 소리가 필요하면 상단 `경고음 꺼`를 눌러 `켬`으로 바꿉니다.
-3. Host Agent에서 USB 반출을 시도하거나 다음 Web 샘플을 전송합니다.
+3. Host Agent에서 실제 반출을 시도하거나 다음 Web fixture 7건을 순차 전송합니다.
 
 ```bash
-python scripts/send_sample_log.py --scenario usb_copy --event-id presentation-usb-alert-001
+python scripts/send_sample_log.py --scenario all --interval 2.5
 ```
 
-4. 정상이면 약 2초 안에 USB 반출 위험 토스트가 뜨고 요약 KPI만 갱신됩니다.
-5. `상세 로그 보기`로 해당 로그를 열고, 기존 필터·페이지·선택 상태가 폴링 때문에 초기화되지 않는지 확인합니다.
+4. 정상이면 모든 시나리오가 약 2초 안에 KPI, 채널 차트와 최근 로그에 반영됩니다. 이 중 고위험 fixture에만 토스트와 경고음이 발생합니다.
+5. `상세 로그 보기`로 해당 로그를 열고, `model_version`, 판단 근거와 반출 채널을 확인합니다.
 
 같은 `event_id`를 다시 전송하면 서버가 기존 `log_id`를 반환하므로 새 알림이 반복되지 않습니다. 다시 시연하려면 고유한 `event_id`를 사용합니다.
 
@@ -612,6 +624,7 @@ python scripts/send_sample_log.py --scenario usb_copy --event-id presentation-us
 - 데이터 저장소는 SQLite이며 운영 DB 전환은 진행 전입니다.
 - 서버 배포에서 SQLite를 유지하려면 `backend/dlp_dashboard.db`가 있는 경로를 영구 볼륨에 보존하고 단일 Web 프로세스로 실행해야 합니다.
 - 위험 알림은 WebSocket/SSE가 아닌 약 2초 주기 HTTP 폴링이며, 화면이 열려 있는 시연·프로토타입 범위입니다.
+- `send_sample_log.py`는 Web 수집·표시 흐름을 확인하는 fixture 전송기이며, Windows의 USB·클립보드·이메일·인쇄 등을 실제로 감지하거나 차단하지 않습니다.
 - Host Agent의 `BLOCKED`는 차단 판정과 조치 시도를 뜻하며, USB 파일 삭제 성공 여부는 현재 로그 계약에 별도 필드로 포함되지 않습니다.
 - 로그 페이지네이션은 프론트에서 최대 200건을 받아 10건씩 표시하는 방식입니다.
 - 차트는 Chart.js CDN을 사용하므로 완전한 오프라인 환경에서는 표시되지 않을 수 있습니다.

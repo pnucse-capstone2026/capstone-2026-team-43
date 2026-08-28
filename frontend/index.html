@@ -1097,6 +1097,7 @@
                 </div>
                 <div class="topbar-meta">
                     <span class="status-pill"><span class="status-dot"></span> API <strong id="apiStatus">확인 중</strong></span>
+                    <span class="status-pill">Web 분석 <strong id="analysisMode">확인 중</strong></span>
                     <span class="status-pill">최근 조회 <strong id="lastUpdated">-</strong></span>
                     <span class="status-pill">최다 채널 <strong id="topChannel">-</strong></span>
                     <button class="status-pill status-button" id="alertSoundToggle" type="button" aria-pressed="false">
@@ -1434,6 +1435,18 @@
             }
         }
 
+        async function refreshDashboardData() {
+            const [, logsResponse] = await Promise.all([
+                refreshDashboardSummary(),
+                fetch("/api/v1/logs?limit=50", { cache: "no-store" })
+            ]);
+            if (!logsResponse.ok) {
+                throw new Error(`Recent logs request failed: ${logsResponse.status}`);
+            }
+            const logs = await logsResponse.json();
+            renderRecentLogs(logs.items || []);
+        }
+
         function hideRealtimeRiskAlert() {
             clearTimeout(riskAlertHideTimer);
             riskAlertHideTimer = null;
@@ -1563,6 +1576,7 @@
                 const result = await response.json();
                 const items = Array.isArray(result.items) ? result.items : [];
                 const nextCursor = Number(result.next_cursor);
+                const previousCursor = riskAlertCursor;
                 const nextCursorEpoch = typeof result.cursor_epoch === "string"
                     ? result.cursor_epoch.trim()
                     : "";
@@ -1574,6 +1588,11 @@
                 }
                 const cursorEpochChanged = riskAlertCursorEpoch !== null
                     && riskAlertCursorEpoch !== nextCursorEpoch;
+                const cursorAdvanced = previousCursor !== null && (
+                    result.cursor_reset === true
+                    || cursorEpochChanged
+                    || nextCursor > previousCursor
+                );
                 if (result.cursor_reset === true || cursorEpochChanged) {
                     riskAlertCursor = nextCursor;
                 } else {
@@ -1582,11 +1601,13 @@
                 riskAlertCursorEpoch = nextCursorEpoch;
                 riskPollFailureCount = 0;
 
+                if (cursorAdvanced) {
+                    refreshDashboardData().catch(error => {
+                        console.warn("신규 이벤트 반영 후 대시보드 갱신 실패", error);
+                    });
+                }
                 if (items.length) {
                     showRealtimeRiskAlert(items);
-                    refreshDashboardSummary().catch(error => {
-                        console.warn("고위험 이벤트 반영 후 대시보드 갱신 실패", error);
-                    });
                 }
             } catch (error) {
                 if (error.name !== "AbortError" || requestTimedOut) {
@@ -2056,6 +2077,7 @@
                 ]);
 
                 setText("apiStatus", health.status.toUpperCase());
+                setText("analysisMode", String(health.analysis_mode || "unknown").toUpperCase());
                 if (summaryGeneration > dashboardSummaryRenderGeneration) {
                     dashboardSummaryRenderGeneration = summaryGeneration;
                     renderDashboardSummary(summary);
@@ -2069,6 +2091,7 @@
                 }
             } catch (error) {
                 setText("apiStatus", "ERROR");
+                setText("analysisMode", "ERROR");
                 setText("logMeta", "로그 정보를 불러오지 못했습니다.");
                 document.getElementById("logTableWrap").innerHTML =
                     '<div class="empty">API 연결에 실패했습니다. FastAPI 서버가 실행 중인지 확인해주세요.</div>';

@@ -13,7 +13,7 @@ Host Agent가 전송한 민감정보 반출 탐지 로그를 저장하고, 관�
 - 고위험 이벤트와 Evidence 상세 분석
 - `log_id` 커서 기반 2초 주기 준실시간 위험 알림과 선택형 경고음
 - Mock AI 분석 및 외부 AI 서버 전달 구조
-- 정책 조회·생성 API
+- 정책 조회·생성 API와 append-only 생성 감사 기록
 
 ## 1. 기술 구성
 
@@ -149,6 +149,7 @@ logging:
 
 - viewer와 admin은 `/dashboard`, `/logs` 및 대시보드 조회 API를 사용할 수 있습니다.
 - `POST /api/v1/policies`는 인증 활성 시 admin만 호출할 수 있으며 viewer는 HTTP `403`을 받습니다. 인증 비활성 시에는 기존처럼 `X-Agent-Token`을 사용합니다.
+- `GET /api/v1/policy-audit`도 인증 활성 시 admin만 조회할 수 있으며, 인증 비활성 시에는 `X-Agent-Token`을 사용합니다. 응답에는 실제 토큰이나 비밀번호가 아닌 `dashboard-admin` 또는 `agent-token` actor label만 포함됩니다.
 - `/api/v1/agent-check`, `POST /api/v1/analyze`, `POST /api/v1/logs`, `POST /api/v1/agents/heartbeat`는 대시보드 인증 여부와 관계없이 계속 `X-Agent-Token`만 사용합니다.
 - `GET /api/v1/agents`는 다른 조회 API와 동일하게 인증 활성 시 viewer/admin Basic 자격 증명이 필요하며 `X-Agent-Token`으로 대신할 수 없습니다.
 - `/health`는 공개 상태 확인용으로 유지되며 `dashboard_auth_enabled`만 노출하고 사용자명과 비밀번호는 노출하지 않습니다.
@@ -174,6 +175,7 @@ Host 통합 검증기가 저장 후 `GET /api/v1/logs`로 readback할 때도 인
 | `GET` | `/api/v1/alerts` | HTTP Basic(활성 시) | 고위험 신규 로그를 `log_id` 커서로 조회 |
 | `GET` | `/api/v1/policies` | HTTP Basic(활성 시) | 정책 목록 조회 |
 | `POST` | `/api/v1/policies` | admin Basic(활성) / `X-Agent-Token`(비활성) | 정책 생성 |
+| `GET` | `/api/v1/policy-audit` | admin Basic(활성) / `X-Agent-Token`(비활성) | 최신 정책 생성 감사 기록 조회 |
 
 정확한 요청 필드와 허용값은 실행 중인 서버의 `/docs`에서 확인할 수 있습니다.
 
@@ -439,6 +441,24 @@ SQLite 파일은 `backend/dlp_dashboard.db`에 생성되지만 Git에는 포함�
 | `is_active` | INTEGER | 활성 상태, `0` 또는 `1` |
 | `exception_extensions` | TEXT | 최대 50개, 각 1~20자인 예외 확장자 배열을 쉼표로 연결해 저장 |
 
+`dlp_policy_audit` 테이블은 성공한 정책 생성을 같은 SQLite transaction에서 기록하며 SQLite trigger가 UPDATE와 DELETE를 거부합니다. 감사 저장이 실패하면 정책 저장도 함께 rollback되며, 기본 정책 seed는 사용자 변경이 아니므로 기록하지 않습니다. `GET /api/v1/policy-audit`는 `limit`(기본 100, 최대 200)과 `offset`(기본 0)을 받고 전체 `total`을 함께 반환해 오래된 기록도 조회할 수 있습니다.
+
+| 컬럼 | SQLite 타입 | 제약 및 설명 |
+| --- | --- | --- |
+| `audit_id` | INTEGER | Primary Key, Auto Increment |
+| `occurred_at` | TEXT | Web 서버가 기록한 생성 시각, UTC ISO 8601 |
+| `actor` | TEXT | 비밀값 없는 `dashboard-admin` 또는 `agent-token` label |
+| `action` | TEXT | 현재 `POLICY_CREATED`만 기록 |
+| `policy_id` | INTEGER | 생성된 정책 식별자 |
+| `policy_name` | TEXT | 생성 당시 정책명 |
+| `description` | TEXT | 생성 당시 정책 설명 |
+| `ai_threshold` | REAL | 생성 당시 경고 기준 점수 |
+| `block_threshold` | REAL | 생성 당시 차단 기준 점수 |
+| `is_active` | INTEGER | 생성 당시 활성 상태 |
+| `exception_extensions` | TEXT | 생성 당시 예외 확장자 목록 |
+
+기존 SQLite 파일에는 서버 시작 시 빈 감사 테이블과 시간순 조회 인덱스만 추가되며 기존 로그·정책은 변경하지 않습니다. 자동 삭제는 하지 않으며, 운영 보존 기간과 백업 위치가 승인된 뒤 별도 보관 절차를 추가해야 합니다.
+
 `dlp_metadata` 테이블:
 
 | 컬럼 | SQLite 타입 | 제약 및 설명 |
@@ -640,6 +660,7 @@ python -m pytest -q
 - 고위험 점수 임계값의 설정 경계와 알림·대시보드 요약 간 일치
 - 알림 UI·2초 폴링·전체 대시보드 반복 로드 금지 정적 계약
 - 정책 생성과 임계치 검증
+- 정책 생성·감사 기록 원자성, 기존 DB 보존과 admin 조회 권한
 - 외부 AI 호출, 응답 정규화와 연결 실패 처리
 - 데모 seed 데이터 분포, 멱등성 및 대시보드 통계 반영
 
@@ -692,6 +713,7 @@ python scripts/send_sample_log.py --scenario all --interval 2.5
 - 실제 Host Agent와 AI 서버의 최종 E2E 통합은 아직 진행 전입니다.
 - 선택형 viewer/admin HTTP Basic만 제공하며 세션 기반 로그인과 세분화된 RBAC는 없습니다.
 - 정책 UI는 제거된 상태이며 정책 수정·삭제 API는 없습니다.
+- 정책 감사 기록은 append-only이며 자동 삭제·보관 이관은 구현하지 않았습니다.
 - 데이터 저장소는 SQLite이며 운영 DB 전환은 진행 전입니다.
 - 서버 배포에서 SQLite를 유지하려면 `backend/dlp_dashboard.db`가 있는 경로를 영구 볼륨에 보존하고 단일 Web 프로세스로 실행해야 합니다.
 - 위험 알림은 WebSocket/SSE가 아닌 약 2초 주기 HTTP 폴링이며, 화면이 열려 있는 시연·프로토타입 범위입니다.

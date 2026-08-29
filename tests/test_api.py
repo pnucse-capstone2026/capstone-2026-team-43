@@ -137,6 +137,9 @@ def test_startup_creates_only_the_temporary_database(
         heartbeat_count = connection.execute(
             "SELECT COUNT(*) FROM dlp_agent_heartbeats"
         ).fetchone()[0]
+        policy_audit_count = connection.execute(
+            "SELECT COUNT(*) FROM dlp_policy_audit"
+        ).fetchone()[0]
         database_epoch = connection.execute(
             """
             SELECT metadata_value
@@ -150,10 +153,12 @@ def test_startup_creates_only_the_temporary_database(
         "dlp_policies",
         "dlp_metadata",
         "dlp_agent_heartbeats",
+        "dlp_policy_audit",
     }.issubset(tables)
     assert log_count == 0
     assert policy_count == 2
     assert heartbeat_count == 0
+    assert policy_audit_count == 0
     assert database_epoch
 
 
@@ -191,7 +196,7 @@ def test_log_schema_migration_adds_model_version_to_existing_database() -> None:
         connection.close()
 
 
-def test_existing_database_adds_empty_heartbeat_table_without_changing_data(
+def test_existing_database_adds_runtime_tables_without_changing_data(
     client: TestClient,
     agent_headers: dict[str, str],
     temp_db_path: Path,
@@ -203,6 +208,7 @@ def test_existing_database_adds_empty_heartbeat_table_without_changing_data(
     )
     with sqlite3.connect(temp_db_path) as connection:
         connection.execute("DROP TABLE dlp_agent_heartbeats")
+        connection.execute("DROP TABLE dlp_policy_audit")
         policy_count_before = connection.execute(
             "SELECT COUNT(*) FROM dlp_policies"
         ).fetchone()[0]
@@ -221,10 +227,14 @@ def test_existing_database_adds_empty_heartbeat_table_without_changing_data(
         heartbeat_count = connection.execute(
             "SELECT COUNT(*) FROM dlp_agent_heartbeats"
         ).fetchone()[0]
+        policy_audit_count = connection.execute(
+            "SELECT COUNT(*) FROM dlp_policy_audit"
+        ).fetchone()[0]
 
     assert preserved_log_count == 1
     assert policy_count_after == policy_count_before
     assert heartbeat_count == 0
+    assert policy_audit_count == 0
 
 
 def test_health_and_frontend_routes(client: TestClient) -> None:
@@ -1540,13 +1550,30 @@ def test_policy_create_and_threshold_validation(
 
     with sqlite3.connect(temp_db_path) as connection:
         count = connection.execute("SELECT COUNT(*) FROM dlp_policies").fetchone()[0]
+        audit = connection.execute(
+            """
+            SELECT actor, action, policy_name, ai_threshold, block_threshold,
+                   is_active, exception_extensions
+            FROM dlp_policy_audit
+            """
+        ).fetchone()
     assert count == 3
+    assert audit == (
+        "agent-token",
+        "POLICY_CREATED",
+        "테스트 정책",
+        0.6,
+        0.8,
+        1,
+        ".tmp",
+    )
 
 
 @pytest.mark.parametrize("token", [None, "wrong-token"])
 def test_policy_create_requires_agent_token(
     client: TestClient,
     token: str | None,
+    temp_db_path: Path,
 ) -> None:
     headers = {"X-Agent-Token": token} if token else {}
 
@@ -1562,12 +1589,15 @@ def test_policy_create_requires_agent_token(
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid or missing agent token."
+    with sqlite3.connect(temp_db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM dlp_policy_audit").fetchone()[0] == 0
 
 
 def test_dashboard_policy_write_requires_admin_when_auth_is_enabled(
     client: TestClient,
     agent_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
+    temp_db_path: Path,
 ) -> None:
     enable_dashboard_auth(monkeypatch)
     payload = {
@@ -1599,6 +1629,171 @@ def test_dashboard_policy_write_requires_admin_when_auth_is_enabled(
     assert viewer.status_code == 403
     assert viewer.json()["detail"] == "Dashboard admin credentials are required."
     assert admin.status_code == 201
+    with sqlite3.connect(temp_db_path) as connection:
+        audit = connection.execute(
+            "SELECT actor, action, policy_name FROM dlp_policy_audit"
+        ).fetchall()
+    assert audit == [("dashboard-admin", "POLICY_CREATED", "dashboard-admin-policy")]
+
+
+def test_policy_audit_read_is_admin_only_with_agent_fallback(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client.post(
+        "/api/v1/policies",
+        headers=agent_headers,
+        json={
+            "policy_name": "audited-policy",
+            "ai_threshold": 0.6,
+            "block_threshold": 0.8,
+        },
+    )
+
+    missing = client.get("/api/v1/policy-audit")
+    agent = client.get("/api/v1/policy-audit", headers=agent_headers)
+
+    assert missing.status_code == 401
+    assert agent.status_code == 200
+    assert agent.json()["count"] == 1
+    item = agent.json()["items"][0]
+    assert datetime.fromisoformat(item["occurred_at"]).tzinfo is not None
+    assert (item["actor"], item["action"], item["policy_name"]) == (
+        "agent-token",
+        "POLICY_CREATED",
+        "audited-policy",
+    )
+    assert item["ai_threshold"] == 0.6
+    assert item["block_threshold"] == 0.8
+    assert not {"token", "password"}.intersection(item)
+
+    enable_dashboard_auth(monkeypatch)
+    agent_only = client.get("/api/v1/policy-audit", headers=agent_headers)
+    viewer = client.get("/api/v1/policy-audit", auth=VIEWER_CREDENTIALS)
+    admin = client.get("/api/v1/policy-audit", auth=ADMIN_CREDENTIALS)
+
+    assert agent_only.status_code == 401
+    assert viewer.status_code == 403
+    assert admin.status_code == 200
+    assert admin.json()["items"][0]["actor"] == "agent-token"
+
+
+def test_policy_audit_supports_server_pagination(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    temp_db_path: Path,
+) -> None:
+    with sqlite3.connect(temp_db_path) as connection:
+        connection.executemany(
+            """
+            INSERT INTO dlp_policy_audit (
+                occurred_at, actor, action, policy_id, policy_name, description,
+                ai_threshold, block_threshold, is_active, exception_extensions
+            ) VALUES (?, 'agent-token', 'POLICY_CREATED', ?, ?, '', 0.6, 0.8, 1, '')
+            """,
+            [
+                ("2026-08-29T06:00:00+00:00", index, f"policy-{index:03d}")
+                for index in range(1, 206)
+            ],
+        )
+
+    first = client.get(
+        "/api/v1/policy-audit",
+        headers=agent_headers,
+        params={"limit": 10},
+    ).json()
+    last = client.get(
+        "/api/v1/policy-audit",
+        headers=agent_headers,
+        params={"limit": 10, "offset": 200},
+    ).json()
+    beyond = client.get(
+        "/api/v1/policy-audit",
+        headers=agent_headers,
+        params={"offset": 205},
+    ).json()
+
+    assert (first["count"], first["total"]) == (10, 205)
+    assert [item["policy_name"] for item in first["items"]] == [
+        f"policy-{index:03d}" for index in range(205, 195, -1)
+    ]
+    assert (last["count"], last["total"]) == (5, 205)
+    assert [item["policy_name"] for item in last["items"]] == [
+        f"policy-{index:03d}" for index in range(5, 0, -1)
+    ]
+    assert beyond == {"items": [], "count": 0, "total": 205}
+    assert client.get(
+        "/api/v1/policy-audit",
+        headers=agent_headers,
+        params={"offset": -1},
+    ).status_code == 422
+
+
+def test_policy_and_audit_insert_are_atomic(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    temp_db_path: Path,
+) -> None:
+    with sqlite3.connect(temp_db_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_policy_audit
+            BEFORE INSERT ON dlp_policy_audit
+            BEGIN
+                SELECT RAISE(ABORT, 'forced audit failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced audit failure"):
+        client.post(
+            "/api/v1/policies",
+            headers=agent_headers,
+            json={
+                "policy_name": "must-roll-back",
+                "ai_threshold": 0.6,
+                "block_threshold": 0.8,
+            },
+        )
+
+    with sqlite3.connect(temp_db_path) as connection:
+        policy_count = connection.execute(
+            "SELECT COUNT(*) FROM dlp_policies WHERE policy_name = 'must-roll-back'"
+        ).fetchone()[0]
+        audit_count = connection.execute("SELECT COUNT(*) FROM dlp_policy_audit").fetchone()[0]
+
+    assert policy_count == 0
+    assert audit_count == 0
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE dlp_policy_audit SET actor = 'dashboard-admin'",
+        "DELETE FROM dlp_policy_audit",
+    ],
+)
+def test_policy_audit_rejects_update_and_delete(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    temp_db_path: Path,
+    statement: str,
+) -> None:
+    client.post(
+        "/api/v1/policies",
+        headers=agent_headers,
+        json={
+            "policy_name": "immutable-audit",
+            "ai_threshold": 0.6,
+            "block_threshold": 0.8,
+        },
+    )
+
+    with sqlite3.connect(temp_db_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute(statement)
+        assert connection.execute("SELECT COUNT(*) FROM dlp_policy_audit").fetchone()[0] == 1
 
 
 class FakeExternalResponse:

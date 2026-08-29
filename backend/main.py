@@ -314,21 +314,22 @@ def verify_dashboard_viewer(
         dashboard_role(credentials)
 
 
-def verify_policy_write_access(
+def verify_policy_admin_access(
     credentials: Annotated[
         HTTPBasicCredentials | None,
         Depends(dashboard_basic),
     ],
     x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
-) -> None:
+) -> str:
     if not DASHBOARD_AUTH_ENABLED:
         verify_agent_token(x_agent_token)
-        return
+        return "agent-token"
     if dashboard_role(credentials) != "admin":
         raise HTTPException(
             status_code=403,
             detail="Dashboard admin credentials are required.",
         )
+    return "dashboard-admin"
 
 
 def normalize_text_items(items: list[str]) -> set[str]:
@@ -673,6 +674,40 @@ def init_db() -> None:
             )
             """
         )
+        # ponytail: append-only; add approved archival when audit volume requires it.
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dlp_policy_audit (
+                audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                occurred_at TEXT NOT NULL,
+                actor TEXT NOT NULL CHECK (actor IN ('dashboard-admin', 'agent-token')),
+                action TEXT NOT NULL CHECK (action = 'POLICY_CREATED'),
+                policy_id INTEGER NOT NULL,
+                policy_name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                ai_threshold REAL NOT NULL,
+                block_threshold REAL NOT NULL,
+                is_active INTEGER NOT NULL,
+                exception_extensions TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dlp_policy_audit_occurred_at
+            ON dlp_policy_audit(occurred_at DESC, audit_id DESC)
+            """
+        )
+        for operation in ("UPDATE", "DELETE"):
+            cursor.execute(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS reject_dlp_policy_audit_{operation.lower()}
+                BEFORE {operation} ON dlp_policy_audit
+                BEGIN
+                    SELECT RAISE(ABORT, 'policy audit is append-only');
+                END
+                """
+            )
 
         policy_count = cursor.execute("SELECT COUNT(*) FROM dlp_policies").fetchone()[0]
         if policy_count == 0:
@@ -751,6 +786,16 @@ def serialize_policy(row: sqlite3.Row) -> dict:
         "block_threshold": row["block_threshold"],
         "is_active": bool(row["is_active"]),
         "exception_extensions": [item for item in row["exception_extensions"].split(",") if item],
+    }
+
+
+def serialize_policy_audit(row: sqlite3.Row) -> dict:
+    return {
+        "audit_id": row["audit_id"],
+        "occurred_at": row["occurred_at"],
+        "actor": row["actor"],
+        "action": row["action"],
+        **serialize_policy(row),
     }
 
 
@@ -1196,7 +1241,7 @@ def list_policies() -> dict:
 @app.post("/api/v1/policies", status_code=201)
 def create_policy(
     payload: PolicyCreate,
-    _: None = Depends(verify_policy_write_access),
+    actor: str = Depends(verify_policy_admin_access),
 ) -> dict:
     if payload.block_threshold < payload.ai_threshold:
         raise HTTPException(
@@ -1221,10 +1266,54 @@ def create_policy(
                 ",".join(payload.exception_extensions),
             ),
         )
-        connection.commit()
         policy_id = cursor.lastrowid
+        cursor.execute(
+            """
+            INSERT INTO dlp_policy_audit (
+                occurred_at, actor, action, policy_id, policy_name, description,
+                ai_threshold, block_threshold, is_active, exception_extensions
+            ) VALUES (?, ?, 'POLICY_CREATED', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).isoformat(),
+                actor,
+                policy_id,
+                payload.policy_name,
+                payload.description,
+                payload.ai_threshold,
+                payload.block_threshold,
+                int(payload.is_active),
+                ",".join(payload.exception_extensions),
+            ),
+        )
+        connection.commit()
 
     return {"message": "Policy saved successfully.", "policy_id": policy_id}
+
+
+@app.get("/api/v1/policy-audit")
+def list_policy_audit(
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    _: str = Depends(verify_policy_admin_access),
+) -> dict:
+    with closing(get_connection()) as connection:
+        total = connection.execute(
+            "SELECT COUNT(*) FROM dlp_policy_audit"
+        ).fetchone()[0]
+        rows = connection.execute(
+            """
+            SELECT * FROM dlp_policy_audit
+            ORDER BY occurred_at DESC, audit_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+    return {
+        "items": [serialize_policy_audit(row) for row in rows],
+        "count": len(rows),
+        "total": total,
+    }
 
 
 @app.get(

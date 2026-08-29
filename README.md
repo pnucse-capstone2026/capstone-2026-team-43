@@ -36,13 +36,12 @@ web/
 │   └── send_sample_log.py      # Agent 로그 및 AI 분석 흐름 시연 스크립트
 ├── tests/
 │   ├── conftest.py             # 임시 DB와 TestClient 공통 fixture
-│   └── test_api.py             # API·DB·AI 자동화 테스트
-├── report/                     # 중간보고서와 이미지 자료
+│   ├── test_api.py             # API·DB·AI 자동화 테스트
+│   └── test_send_sample_log.py # fixture 전송 스크립트 테스트
 ├── .env.example                # 환경변수 예시
 ├── pytest.ini                  # pytest 실행 설정
 ├── requirements.txt            # 실행 의존성
-├── requirements-dev.txt        # 개발·테스트 의존성
-└── webplan.md                  # 상세 구현 진행 기록
+└── requirements-dev.txt        # 개발·테스트 의존성
 ```
 
 `backend/dlp_dashboard.db`는 로컬 실행 데이터이므로 Git 병합 대상에서 제외합니다. 서버가 시작될 때 DB와 필수 테이블이 없으면 자동으로 생성됩니다.
@@ -76,9 +75,9 @@ python -m pip install -r requirements-dev.txt
 
 | 이름 | 필수 여부 | 기본 동작 | 설명 |
 | --- | --- | --- | --- |
-| `AGENT_API_TOKEN` | 팀 연동 시 필수 | 로컬 데모 토큰 사용 | Agent가 분석·로그 수집 API를 호출할 때 보내는 토큰 |
+| `AGENT_API_TOKEN` | 팀 연동 시 필수 | 로컬 데모 토큰 사용 | Agent가 분석·로그 수집 API를 호출할 때 보내는 32자 이상 ASCII 토큰 |
 | `AI_SERVER_URL` | 선택 | 내부 Mock 분석 | 실제 AI 서버 주소 |
-| `AI_SERVER_TOKEN` | 선택 | 미사용 | 외부 AI 서버에 전달하는 Bearer 토큰 |
+| `AI_SERVER_TOKEN` | 외부 AI 사용 시 필수 | 미사용 | 외부 AI 서버의 `AI_API_TOKEN`과 같은 32자 이상 ASCII Bearer 토큰 |
 | `AI_SERVER_TIMEOUT_SECONDS` | 선택 | `5` | 외부 AI 서버 응답 대기 시간(초) |
 
 팀 공유 또는 시연 환경에서는 예시 파일을 복사한 뒤 토큰을 반드시 교체합니다.
@@ -93,7 +92,7 @@ cp .env.example .env
 
 ### 5.1 빠른 로컬 실행
 
-환경변수를 설정하지 않으면 내부 Mock AI 분석과 로컬 데모 Agent 토큰을 사용합니다.
+환경변수를 설정하지 않으면 내부 Mock AI 분석과 로컬 데모 Agent 토큰을 사용합니다. 이 기본 토큰은 `127.0.0.1`의 개발 확인용이며 LAN 시연에서도 반드시 `.env`의 `AGENT_API_TOKEN`을 새 값으로 교체합니다.
 
 ```bash
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
@@ -135,7 +134,7 @@ logging:
   send_immediately: true
 ```
 
-대시보드를 먼저 연 뒤 Host Agent에서 반출 시나리오를 실행하면, 새 `BLOCKED` 이벤트 또는 AI 점수 `0.85` 이상 이벤트가 약 2초 안에 다른 컴퓨터의 대시보드에 표시됩니다. 두 컴퓨터 사이에서 TCP 8000 포트 접근이 가능해야 하며, 공용 네트워크나 외부 서버에서는 HTTPS와 별도의 접근 제어를 사용합니다.
+대시보드를 먼저 연 뒤 Host Agent에서 반출 시나리오를 실행하면, 새 `BLOCKED` 이벤트 또는 AI 점수 `0.85` 이상 이벤트가 약 2초 안에 다른 컴퓨터의 대시보드에 표시됩니다. 두 컴퓨터 사이에서 TCP 8000 포트 접근이 가능해야 합니다. 본 앱은 브라우저 API를 same-origin으로만 사용하며 cross-origin 요청을 허용하지 않습니다. 조회 API에는 관리자 로그인이 없으므로 통제된 시연 LAN 밖에 공개하지 않고, 외부 서버는 HTTPS·인증 reverse proxy를 먼저 적용합니다.
 
 ## 6. 주요 API
 
@@ -151,7 +150,7 @@ logging:
 | `GET` | `/api/v1/dashboard/summary` | 불필요 | 최근 기간 KPI와 차트 데이터 조회 |
 | `GET` | `/api/v1/alerts` | 불필요 | 고위험 신규 로그를 `log_id` 커서로 조회 |
 | `GET` | `/api/v1/policies` | 불필요 | 정책 목록 조회 |
-| `POST` | `/api/v1/policies` | 현재 불필요 | 정책 생성 |
+| `POST` | `/api/v1/policies` | `X-Agent-Token` | 정책 생성 |
 
 정확한 요청 필드와 허용값은 실행 중인 서버의 `/docs`에서 확인할 수 있습니다.
 
@@ -215,7 +214,7 @@ Host Agent는 `POST /api/v1/logs`로 탐지 결과를 전송합니다. 요청 �
 | `detection_type` | string | 필수 | `RULE_BASED`, `AI_MODEL`, `HYBRID` |
 | `ai_score` | number | 필수 | `0.0`~`1.0` 범위의 민감도 점수 |
 | `model_version` | string | 선택 | 최대 100자. AI 판별에 사용된 모델 버전. 규칙 전용 판정이면 생략 가능 |
-| `matched_keywords` | string[] | 선택 | 탐지에 사용된 키워드. 생략 시 빈 배열 |
+| `matched_keywords` | string[] | 선택 | 최대 100개, 각 1~100자. 탐지에 사용된 키워드. 생략 시 빈 배열 |
 | `policy_id` | string | 선택 | 최대 100자. 적용된 Agent/서버 정책 식별자 |
 | `action_taken` | string | 필수 | `BLOCKED`, `WARNED`, `ALLOWED` |
 | `decision_reason` | string | 선택 | 최대 500자. Agent의 최종 조치 판단 사유 |
@@ -282,9 +281,9 @@ Host Agent가 웹 서버의 분석 중계 API를 사용할 경우 `POST /api/v1/
 | `event_id` | string | 필수 | 1~120자. 이후 로그 저장 요청과 동일한 ID 사용 |
 | `channel` | string | 필수 | `clipboard`, `outlook`, `http`, `usb`, `smtp`, `web_mail`, `file_guard`, `drive_upload`, `web_upload`, `email_attachment`, `print`, `messenger` |
 | `user_id` | string | 필수 | 1~100자. 분석 대상 사용자 식별자 |
-| `matched_patterns` | string[] | 선택 | Agent 규칙 탐지 단계에서 찾은 패턴 목록 |
+| `matched_patterns` | string[] | 선택 | 최대 100개, 각 1~100자. Agent 규칙 탐지 단계에서 찾은 패턴 목록 |
 | `snippet` | string | 필수 | 1~4000자. AI가 분석할 텍스트 또는 요약 |
-| `metadata` | object | 선택 | 앱, 목적지, 파일명, 심각도 등 추가 문맥 |
+| `metadata` | object | 선택 | 최대 50개 항목. 키 1~100자, 문자열 값 최대 500자, 수치는 유한값만 허용. 앱, 목적지, 파일명, 심각도 등 추가 문맥 |
 
 요청 예시:
 
@@ -303,6 +302,8 @@ Host Agent가 웹 서버의 분석 중계 API를 사용할 경우 `POST /api/v1/
   }
 }
 ```
+
+로그·분석·정책 생성 요청은 문서에 없는 추가 필드를 422로 거절해 필드명 오타가 조용히 누락되지 않게 합니다.
 
 웹 서버가 Agent에 반환하는 정규화 응답:
 
@@ -390,7 +391,7 @@ SQLite 파일은 `backend/dlp_dashboard.db`에 생성되지만 Git에는 포함�
 | `ai_threshold` | REAL | 경고 기준 점수 |
 | `block_threshold` | REAL | 차단 기준 점수. `ai_threshold` 이상이어야 함 |
 | `is_active` | INTEGER | 활성 상태, `0` 또는 `1` |
-| `exception_extensions` | TEXT | 예외 확장자 배열을 쉼표로 연결해 저장 |
+| `exception_extensions` | TEXT | 최대 50개, 각 1~20자인 예외 확장자 배열을 쉼표로 연결해 저장 |
 
 `dlp_metadata` 테이블:
 
@@ -616,7 +617,7 @@ python -c "from fastapi.testclient import TestClient; print('TestClient ready')"
 python scripts/send_sample_log.py --scenario all --interval 2.5
 ```
 
-4. 정상이면 모든 시나리오가 약 2초 안에 KPI, 채널 차트와 최근 로그에 반영됩니다. 이 중 고위험 fixture에만 토스트와 경고음이 발생합니다.
+4. 정상이면 각 이벤트가 전송된 뒤 약 2초 안에 KPI, 채널 차트와 최근 로그에 반영됩니다. `--interval 2.5`로 7건을 보내는 전체 fixture 시연은 약 18초가 걸리며, 이 중 고위험 fixture에만 토스트와 경고음이 발생합니다.
 5. `상세 로그 보기`로 해당 로그를 열고, `model_version`, 판단 근거와 반출 채널을 확인합니다.
 
 같은 `event_id`를 다시 전송하면 서버가 기존 `log_id`를 반환하므로 새 알림이 반복되지 않습니다. 다시 시연하려면 고유한 `event_id`를 사용합니다.
@@ -633,6 +634,4 @@ python scripts/send_sample_log.py --scenario all --interval 2.5
 - `send_sample_log.py`는 Windows의 USB·클립보드·이메일 등을 실제로 감지하거나 차단하지 않습니다.
 - Host Agent의 USB `BLOCKED`는 대상 파일의 사후 삭제가 실제로 성공한 경우에만 기록합니다. 삭제 직전·도중 파일이 없어졌거나, 분석 뒤 파일 지문이 바뀌었거나, 권한·잠금·드라이브 이탈로 삭제를 확인할 수 없으면 다른 파일을 삭제하지 않고 `WARNED`와 실패 사유로 기록합니다.
 - 로그 페이지네이션은 프론트에서 최대 200건을 받아 10건씩 표시하는 방식입니다.
-- 차트는 Chart.js CDN을 사용하므로 완전한 오프라인 환경에서는 표시되지 않을 수 있습니다.
-
-세부 구현 이력과 기존 검증 결과는 `webplan.md`를 참고합니다.
+- 차트는 버전과 무결성 해시를 고정한 Chart.js CDN을 사용하므로 완전한 오프라인 환경에서는 차트만 표시되지 않습니다. CDN 로드가 실패해도 KPI·로그·실시간 알림·경고음은 계속 작동합니다.

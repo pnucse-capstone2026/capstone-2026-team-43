@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import inspect
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
+from threading import Event
 from urllib.error import URLError
 
 import pytest
+from pydantic import ValidationError
 from fastapi.testclient import TestClient
 
 from backend import main
@@ -200,6 +204,10 @@ def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
         "const RISK_POLL_INTERVAL_MS = 2000",
         "function pollRealtimeRiskAlerts",
         "async function refreshDashboardData()",
+        "function createDashboardChart",
+        'typeof window.Chart !== "function"',
+        "if (timelineChart) {",
+        "if (channelChart) {",
         'fetch(`/api/v1/alerts?',
         'query.set("cursor_epoch", riskAlertCursorEpoch)',
         "startRiskPolling();\n        loadDashboard();",
@@ -214,6 +222,173 @@ def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
 
     assert "setInterval(loadDashboard" not in html
     assert html.index("if (cursorAdvanced) {") < html.index("if (items.length) {")
+    assert html.index("alertSoundEnabled = shouldEnable") > html.index("await alertAudioContext.resume()")
+    assert 'setText("alertSoundStatus", "사용 불가")' in html
+    assert 'console.warn("경고음을 활성화하지 못했습니다.", error)' in html
+
+
+def test_same_origin_dashboard_does_not_enable_wildcard_cors(client: TestClient) -> None:
+    response = client.options(
+        "/api/v1/logs",
+        headers={
+            "Origin": "https://untrusted.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_frontend_pins_chart_dependency_with_integrity(client: TestClient) -> None:
+    html = client.get("/dashboard").text
+
+    assert "chart.js@4.5.1/dist/chart.umd.min.js" in html
+    assert (
+        'integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+'
+        '6DChMTBJemed7ZnvJ"'
+    ) in html
+    assert "crossorigin=\"anonymous\"" in html
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "field"),
+    [
+        (
+            "/api/v1/logs",
+            {**make_log_payload("too-many-keywords"), "matched_keywords": ["k"] * 101},
+            "matched_keywords",
+        ),
+        (
+            "/api/v1/analyze",
+            {**make_analyze_payload("too-many-patterns"), "matched_patterns": ["p"] * 101},
+            "matched_patterns",
+        ),
+        (
+            "/api/v1/analyze",
+            {**make_analyze_payload("too-much-metadata"), "metadata": {f"k{i}": i for i in range(51)}},
+            "metadata",
+        ),
+        (
+            "/api/v1/policies",
+            {
+                "policy_name": "too-many-extensions",
+                "ai_threshold": 0.4,
+                "block_threshold": 0.8,
+                "exception_extensions": [f"x{i}" for i in range(51)],
+            },
+            "exception_extensions",
+        ),
+    ],
+)
+def test_agent_payload_collections_have_size_limits(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    endpoint: str,
+    payload: dict,
+    field: str,
+) -> None:
+    response = client.post(endpoint, json=payload, headers=agent_headers)
+
+    assert response.status_code == 422
+    assert any(item["loc"][-1] == field for item in response.json()["detail"])
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "field"),
+    [
+        (
+            "/api/v1/logs",
+            {**make_log_payload("long-keyword"), "matched_keywords": ["k" * 101]},
+            "matched_keywords",
+        ),
+        (
+            "/api/v1/analyze",
+            {**make_analyze_payload("long-pattern"), "matched_patterns": ["p" * 101]},
+            "matched_patterns",
+        ),
+        (
+            "/api/v1/analyze",
+            {**make_analyze_payload("long-metadata"), "metadata": {"detail": "v" * 501}},
+            "metadata",
+        ),
+        (
+            "/api/v1/analyze",
+            {**make_analyze_payload("long-metadata-key"), "metadata": {"k" * 101: "value"}},
+            "metadata",
+        ),
+        (
+            "/api/v1/policies",
+            {
+                "policy_name": "long-extension",
+                "ai_threshold": 0.4,
+                "block_threshold": 0.8,
+                "exception_extensions": ["e" * 21],
+            },
+            "exception_extensions",
+        ),
+    ],
+)
+def test_agent_payload_collection_items_have_length_limits(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    endpoint: str,
+    payload: dict,
+    field: str,
+) -> None:
+    response = client.post(endpoint, json=payload, headers=agent_headers)
+
+    assert response.status_code == 422
+    assert any(field in item["loc"] for item in response.json()["detail"])
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload"),
+    [
+        ("/api/v1/logs", {**make_log_payload("extra-log-field"), "typo_field": True}),
+        ("/api/v1/analyze", {**make_analyze_payload("extra-analysis-field"), "typo_field": True}),
+        (
+            "/api/v1/policies",
+            {
+                "policy_name": "extra-policy-field",
+                "ai_threshold": 0.4,
+                "block_threshold": 0.8,
+                "typo_field": True,
+            },
+        ),
+    ],
+)
+def test_write_contracts_reject_unknown_fields(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    endpoint: str,
+    payload: dict,
+) -> None:
+    response = client.post(endpoint, json=payload, headers=agent_headers)
+
+    assert response.status_code == 422
+    assert any(item["loc"][-1] == "typo_field" for item in response.json()["detail"])
+
+
+def test_analysis_metadata_rejects_non_finite_numbers() -> None:
+    with pytest.raises(ValidationError):
+        main.AnalyzeRequest(
+            **{
+                **make_analyze_payload("non-finite-metadata"),
+                "metadata": {"score": float("nan")},
+            }
+        )
+
+
+@pytest.mark.parametrize("token", ["short", "가" * 32])
+def test_configured_tokens_must_be_long_ascii_values(token: str) -> None:
+    with pytest.raises(RuntimeError):
+        main.require_ascii_token("TEST_TOKEN", token)
+
+    assert main.require_ascii_token("TEST_TOKEN", "a" * 32) is None
+
+
+def test_external_analysis_endpoint_uses_fastapi_worker_thread() -> None:
+    assert inspect.iscoroutinefunction(main.analyze_event) is False
 
 
 @pytest.mark.parametrize("token", [None, "wrong-token"])
@@ -772,6 +947,7 @@ def test_dashboard_summary_includes_the_first_day_from_midnight(
 
 def test_policy_create_and_threshold_validation(
     client: TestClient,
+    agent_headers: dict[str, str],
     temp_db_path: Path,
 ) -> None:
     initial = client.get("/api/v1/policies")
@@ -780,6 +956,7 @@ def test_policy_create_and_threshold_validation(
 
     valid_response = client.post(
         "/api/v1/policies",
+        headers=agent_headers,
         json={
             "policy_name": "테스트 정책",
             "description": "자동화 테스트용 정책",
@@ -791,6 +968,7 @@ def test_policy_create_and_threshold_validation(
     )
     invalid_response = client.post(
         "/api/v1/policies",
+        headers=agent_headers,
         json={
             "policy_name": "잘못된 정책",
             "ai_threshold": 0.9,
@@ -807,6 +985,27 @@ def test_policy_create_and_threshold_validation(
     assert count == 3
 
 
+@pytest.mark.parametrize("token", [None, "wrong-token"])
+def test_policy_create_requires_agent_token(
+    client: TestClient,
+    token: str | None,
+) -> None:
+    headers = {"X-Agent-Token": token} if token else {}
+
+    response = client.post(
+        "/api/v1/policies",
+        headers=headers,
+        json={
+            "policy_name": "unauthorized-policy",
+            "ai_threshold": 0.6,
+            "block_threshold": 0.8,
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid or missing agent token."
+
+
 class FakeExternalResponse:
     def __init__(self, payload: object) -> None:
         self.body = json.dumps(payload).encode("utf-8")
@@ -819,6 +1018,48 @@ class FakeExternalResponse:
 
     def read(self) -> bytes:
         return self.body
+
+
+def test_slow_external_ai_does_not_block_health_requests(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ai_call_started = Event()
+    release_ai_call = Event()
+
+    def slow_urlopen(request: object, timeout: float) -> FakeExternalResponse:
+        ai_call_started.set()
+        assert release_ai_call.wait(timeout=2)
+        return FakeExternalResponse(
+            {
+                "event_id": "slow-external-ai",
+                "decision": "allow",
+                "confidence_score": 0.12,
+                "model_version": "koelectra-dlp-v7",
+                "latency_ms": 1200,
+                "reason": "normal context",
+            }
+        )
+
+    monkeypatch.setattr(main, "AI_SERVER_URL", "http://slow-ai.example")
+    monkeypatch.setattr(main, "urlopen", slow_urlopen)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        analyze_future = executor.submit(
+            client.post,
+            "/api/v1/analyze",
+            json=make_analyze_payload("slow-external-ai"),
+            headers=agent_headers,
+        )
+        assert ai_call_started.wait(timeout=1)
+        health_future = executor.submit(client.get, "/health")
+        try:
+            assert health_future.result(timeout=1).status_code == 200
+        finally:
+            release_ai_call.set()
+
+        assert analyze_future.result(timeout=2).status_code == 200
 
 
 @pytest.mark.parametrize("channel", ["smtp", "web_mail", "file_guard"])
@@ -976,6 +1217,32 @@ def test_external_ai_identity_contract_violations_return_502(
             "decision": "block",
             "confidence_score": "not-a-number",
             "model_version": "team-ai-v1",
+        },
+        {
+            "event_id": "analyze-test-001",
+            "decision": "block",
+            "confidence_score": True,
+            "model_version": "team-ai-v1",
+        },
+        {
+            "event_id": "analyze-test-001",
+            "decision": "allow",
+            "confidence_score": 0.1,
+            "model_version": "team-ai-v1",
+            "latency_ms": 600001,
+        },
+        {
+            "event_id": "analyze-test-001",
+            "decision": "allow",
+            "confidence_score": 0.1,
+            "model_version": "m" * 101,
+        },
+        {
+            "event_id": "analyze-test-001",
+            "decision": "allow",
+            "confidence_score": 0.1,
+            "model_version": "team-ai-v1",
+            "reason": "r" * 501,
         },
     ],
 )

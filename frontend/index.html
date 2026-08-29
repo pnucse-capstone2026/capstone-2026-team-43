@@ -4,7 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>민감정보 파일 반출 탐지를 위한 AI 기반 Host DLP 시스템</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"
+        integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ"
+        crossorigin="anonymous"
+    ></script>
     <style>
         :root {
             --bg: #f5f8fc;
@@ -1320,7 +1324,16 @@
 
         setPage(currentPage);
 
-        const timelineChart = new Chart(document.getElementById("timelineChart"), {
+        function createDashboardChart(canvasId, config) {
+            if (typeof window.Chart !== "function") {
+                console.warn("Chart.js를 불러오지 못해 차트만 비활성화합니다.");
+                document.getElementById(canvasId).hidden = true;
+                return null;
+            }
+            return new window.Chart(document.getElementById(canvasId), config);
+        }
+
+        const timelineChart = createDashboardChart("timelineChart", {
             type: "line",
             data: {
                 labels: [],
@@ -1353,7 +1366,7 @@
             }
         });
 
-        const channelChart = new Chart(document.getElementById("channelChart"), {
+        const channelChart = createDashboardChart("channelChart", {
             type: "doughnut",
             data: {
                 labels: [],
@@ -1410,13 +1423,17 @@
                 : 0;
             setText("blockedRate", `${blockedRate}%`);
 
-            timelineChart.data.labels = summary.timeline.map(item => item.date.slice(5));
-            timelineChart.data.datasets[0].data = summary.timeline.map(item => item.count);
-            timelineChart.update();
+            if (timelineChart) {
+                timelineChart.data.labels = summary.timeline.map(item => item.date.slice(5));
+                timelineChart.data.datasets[0].data = summary.timeline.map(item => item.count);
+                timelineChart.update();
+            }
 
-            channelChart.data.labels = summary.channel_breakdown.map(item => item.channel);
-            channelChart.data.datasets[0].data = summary.channel_breakdown.map(item => item.count);
-            channelChart.update();
+            if (channelChart) {
+                channelChart.data.labels = summary.channel_breakdown.map(item => item.channel);
+                channelChart.data.datasets[0].data = summary.channel_breakdown.map(item => item.count);
+                channelChart.update();
+            }
 
             renderDepartmentRanking(summary.top_departments);
             renderHighRiskEvents(summary.high_risk_events || []);
@@ -1484,14 +1501,22 @@
                 return;
             }
 
-            alertSoundEnabled = !alertSoundEnabled;
-            if (alertSoundEnabled) {
-                alertAudioContext ||= new AudioContextClass();
-                if (alertAudioContext.state === "suspended") {
-                    await alertAudioContext.resume();
+            const shouldEnable = !alertSoundEnabled;
+            try {
+                if (shouldEnable) {
+                    alertAudioContext ||= new AudioContextClass();
+                    if (alertAudioContext.state === "suspended") {
+                        await alertAudioContext.resume();
+                    }
                 }
+            } catch (error) {
+                alertSoundEnabled = false;
+                setText("alertSoundStatus", "사용 불가");
+                console.warn("경고음을 활성화하지 못했습니다.", error);
+                return;
             }
 
+            alertSoundEnabled = shouldEnable;
             const toggle = document.getElementById("alertSoundToggle");
             toggle.setAttribute("aria-pressed", String(alertSoundEnabled));
             setText("alertSoundStatus", alertSoundEnabled ? "켬" : "끔");

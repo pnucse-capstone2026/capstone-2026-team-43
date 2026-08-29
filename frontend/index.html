@@ -695,6 +695,11 @@
             border-color: var(--blue);
         }
 
+        .page-button:disabled {
+            cursor: not-allowed;
+            opacity: 0.45;
+        }
+
         .detail-panel {
             margin-top: 16px;
             padding: 18px;
@@ -1294,6 +1299,7 @@
         let currentPage = window.location.pathname === "/logs" ? "logs" : "dashboard";
         let pendingLogId = params.get("log_id") ? Number(params.get("log_id")) : null;
         let currentLogItems = [];
+        let currentLogTotal = 0;
         let currentHighRiskItems = [];
         let currentLogPage = 1;
         let selectedLogId = null;
@@ -1927,22 +1933,18 @@
                 document.getElementById("startDateFilter").value = "";
                 document.getElementById("endDateFilter").value = "";
 
-                const response = await fetch("/api/v1/logs?limit=200");
-                const logs = await response.json();
-                currentLogItems = logs.items;
+                const targetPage = await findLogPage(targetLogId);
+                await loadLogs(targetPage || 1);
                 itemIndex = currentLogItems.findIndex(item => item.log_id === targetLogId);
-            }
-
-            if (itemIndex >= 0) {
-                currentLogPage = Math.floor(itemIndex / LOGS_PER_PAGE) + 1;
             }
 
             await loadLogDetail(targetLogId, itemIndex >= 0 ? "row" : "detail");
         }
 
-        function renderLogs(items) {
+        function renderLogs(items, total = currentLogTotal) {
             const container = document.getElementById("logTableWrap");
             currentLogItems = items;
+            currentLogTotal = total;
             if (!items.length) {
                 currentLogPage = 1;
                 setText("logMeta", "필터 결과 0건");
@@ -1951,16 +1953,11 @@
                 return;
             }
 
-            const totalPages = Math.max(1, Math.ceil(items.length / LOGS_PER_PAGE));
-            if (currentLogPage > totalPages) {
-                currentLogPage = totalPages;
-            }
-
+            const totalPages = Math.max(1, Math.ceil(total / LOGS_PER_PAGE));
             const startIndex = (currentLogPage - 1) * LOGS_PER_PAGE;
-            const visibleItems = items.slice(startIndex, startIndex + LOGS_PER_PAGE);
             const summaryText = totalPages > 1
-                ? `필터 결과 ${items.length}건 중 ${startIndex + 1}-${startIndex + visibleItems.length}건 표시`
-                : `현재 ${items.length}건 표시 중`;
+                ? `필터 결과 ${total}건 중 ${startIndex + 1}-${startIndex + items.length}건 표시`
+                : `현재 ${total}건 표시 중`;
             setText("logMeta", summaryText);
 
             container.innerHTML = `
@@ -1979,7 +1976,7 @@
                             </tr>
                         </thead>
                         <tbody>
-                            ${visibleItems.map(item => `
+                            ${items.map(item => `
                                 <tr
                                     class="log-row ${selectedLogId === item.log_id ? "selected" : ""}"
                                     data-log-id="${item.log_id}"
@@ -2000,24 +1997,27 @@
                     </table>
                 </div>
                 ${totalPages > 1 ? `
-                    <div class="pagination-bar">
-                        ${Array.from({ length: totalPages }, (_, index) => `
-                            <button
-                                class="button page-button ${currentLogPage === index + 1 ? "active" : ""}"
-                                type="button"
-                                data-page="${index + 1}"
-                            >
-                                ${index + 1}
-                            </button>
-                        `).join("")}
+                    <div class="pagination-bar" aria-label="로그 페이지 이동">
+                        <button
+                            class="button page-button"
+                            type="button"
+                            data-page="${currentLogPage - 1}"
+                            ${currentLogPage === 1 ? "disabled" : ""}
+                        >이전</button>
+                        <span class="pill" aria-live="polite">${currentLogPage} / ${totalPages} 페이지</span>
+                        <button
+                            class="button page-button"
+                            type="button"
+                            data-page="${currentLogPage + 1}"
+                            ${currentLogPage === totalPages ? "disabled" : ""}
+                        >다음</button>
                     </div>
                 ` : ""}
             `;
 
             container.querySelectorAll(".page-button").forEach(button => {
                 button.addEventListener("click", () => {
-                    currentLogPage = Number(button.dataset.page);
-                    renderLogs(currentLogItems);
+                    loadLogs(Number(button.dataset.page));
                 });
             });
 
@@ -2032,7 +2032,7 @@
             });
         }
 
-        function buildLogQuery() {
+        function buildLogQuery(page = currentLogPage, limit = LOGS_PER_PAGE) {
             const params = new URLSearchParams();
             const action = document.getElementById("actionFilter").value;
             const channel = document.getElementById("channelFilter").value;
@@ -2049,9 +2049,32 @@
             if (startDate) params.set("start_date", startDate);
             if (endDate) params.set("end_date", endDate);
             if (keyword) params.set("q", keyword);
-            params.set("limit", "200");
+            params.set("limit", String(limit));
+            params.set("offset", String((page - 1) * limit));
 
             return `/api/v1/logs?${params.toString()}`;
+        }
+
+        async function findLogPage(logId) {
+            // ponytail: deep links scan bounded API pages; add a rank endpoint only if volume makes this slow.
+            const chunkSize = 200;
+            for (let chunkPage = 1; ; chunkPage += 1) {
+                const response = await fetch(buildLogQuery(chunkPage, chunkSize));
+                if (!response.ok) throw new Error(`Log locator request failed: ${response.status}`);
+                const logs = await response.json();
+                const itemIndex = Array.isArray(logs.items)
+                    ? logs.items.findIndex(item => item.log_id === logId)
+                    : -1;
+                if (itemIndex >= 0) {
+                    const position = ((chunkPage - 1) * chunkSize) + itemIndex;
+                    return Math.floor(position / LOGS_PER_PAGE) + 1;
+                }
+                const total = Number(logs.total);
+                if (!Number.isInteger(total) || total < 0) {
+                    throw new Error("Log locator response has an invalid total.");
+                }
+                if (chunkPage * chunkSize >= total) return null;
+            }
         }
 
         function renderFilterOptions(options) {
@@ -2081,15 +2104,22 @@
             renderFilterOptions(options);
         }
 
-        async function loadLogs() {
-            currentLogPage = 1;
+        async function loadLogs(page = 1) {
+            currentLogPage = Math.max(1, Number(page) || 1);
             selectedLogId = null;
             currentLogDetail = null;
             renderLogDetail(null);
             renderHighRiskEvents(currentHighRiskItems);
-            const response = await fetch(buildLogQuery());
+            const response = await fetch(buildLogQuery(currentLogPage));
+            if (!response.ok) throw new Error(`Log list request failed: ${response.status}`);
             const logs = await response.json();
-            renderLogs(logs.items);
+            const total = Number(logs.total);
+            if (!Number.isInteger(total) || total < 0 || !Array.isArray(logs.items)) {
+                throw new Error("Log list response has invalid pagination fields.");
+            }
+            const totalPages = Math.max(1, Math.ceil(total / LOGS_PER_PAGE));
+            if (currentLogPage > totalPages) return loadLogs(totalPages);
+            renderLogs(logs.items, total);
             renderRecentLogs(logs.items);
         }
 
@@ -2129,16 +2159,16 @@
             }
         }
 
-        document.getElementById("refreshLogsButton").addEventListener("click", loadLogs);
-        document.getElementById("actionFilter").addEventListener("change", loadLogs);
-        document.getElementById("channelFilter").addEventListener("change", loadLogs);
-        document.getElementById("departmentFilter").addEventListener("change", loadLogs);
-        document.getElementById("userFilter").addEventListener("change", loadLogs);
-        document.getElementById("startDateFilter").addEventListener("change", loadLogs);
-        document.getElementById("endDateFilter").addEventListener("change", loadLogs);
+        document.getElementById("refreshLogsButton").addEventListener("click", () => loadLogs(1));
+        document.getElementById("actionFilter").addEventListener("change", () => loadLogs(1));
+        document.getElementById("channelFilter").addEventListener("change", () => loadLogs(1));
+        document.getElementById("departmentFilter").addEventListener("change", () => loadLogs(1));
+        document.getElementById("userFilter").addEventListener("change", () => loadLogs(1));
+        document.getElementById("startDateFilter").addEventListener("change", () => loadLogs(1));
+        document.getElementById("endDateFilter").addEventListener("change", () => loadLogs(1));
         document.getElementById("searchInput").addEventListener("input", () => {
             clearTimeout(window.logSearchTimer);
-            window.logSearchTimer = setTimeout(loadLogs, 250);
+            window.logSearchTimer = setTimeout(() => loadLogs(1), 250);
         });
         document.getElementById("alertSoundToggle").addEventListener("click", () => {
             toggleAlertSound().catch(error => {

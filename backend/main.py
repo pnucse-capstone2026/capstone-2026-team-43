@@ -892,6 +892,7 @@ def create_log(
 @app.get("/api/v1/logs", dependencies=[Depends(verify_dashboard_viewer)])
 def list_logs(
     limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     action: str | None = Query(default=None),
     leak_channel: str | None = Query(default=None),
     department: str | None = Query(default=None),
@@ -901,35 +902,35 @@ def list_logs(
     end_date: str | None = Query(default=None),
     q: str | None = Query(default=None),
 ) -> dict:
-    query = """
-        SELECT * FROM dlp_logs
+    where_clause = """
+        FROM dlp_logs
         WHERE 1=1
     """
     params: list[str | int] = []
 
     if action:
-        query += " AND action_taken = ?"
+        where_clause += " AND action_taken = ?"
         params.append(action)
     if leak_channel:
-        query += " AND leak_channel = ?"
+        where_clause += " AND leak_channel = ?"
         params.append(leak_channel)
     if department:
-        query += " AND department = ?"
+        where_clause += " AND department = ?"
         params.append(department)
     if user_id:
-        query += " AND user_id = ?"
+        where_clause += " AND user_id = ?"
         params.append(user_id)
     if agent_id:
-        query += " AND agent_id = ?"
+        where_clause += " AND agent_id = ?"
         params.append(agent_id)
     if start_date:
-        query += " AND timestamp >= ?"
+        where_clause += " AND timestamp >= ?"
         params.append(f"{start_date}T00:00:00+00:00")
     if end_date:
-        query += " AND timestamp <= ?"
+        where_clause += " AND timestamp <= ?"
         params.append(f"{end_date}T23:59:59+00:00")
     if q:
-        query += """
+        where_clause += """
             AND (
                 file_name LIKE ? OR file_path LIKE ? OR user_id LIKE ? OR
                 hostname LIKE ? OR department LIKE ? OR agent_id LIKE ? OR event_id LIKE ?
@@ -938,13 +939,27 @@ def list_logs(
         search = f"%{q}%"
         params.extend([search, search, search, search, search, search, search])
 
-    query += " ORDER BY timestamp DESC LIMIT ?"
-    params.append(limit)
-
     with closing(get_connection()) as connection:
-        rows = connection.execute(query, params).fetchall()
+        total = connection.execute(
+            f"SELECT COUNT(*) {where_clause}",
+            params,
+        ).fetchone()[0]
+        rows = connection.execute(
+            f"""
+            SELECT * {where_clause}
+            ORDER BY timestamp DESC, log_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, limit, offset],
+        ).fetchall()
 
-    return {"items": [serialize_log(row) for row in rows], "count": len(rows)}
+    return {
+        "items": [serialize_log(row) for row in rows],
+        "count": len(rows),
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @app.get("/api/v1/alerts", dependencies=[Depends(verify_dashboard_viewer)])

@@ -397,6 +397,30 @@ def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
     assert 'console.warn("경고음을 활성화하지 못했습니다.", error)' in html
 
 
+def test_frontend_uses_server_side_log_pagination(client: TestClient) -> None:
+    html = client.get("/logs").text
+
+    for marker in (
+        "let currentLogTotal = 0",
+        "function buildLogQuery(page = currentLogPage, limit = LOGS_PER_PAGE)",
+        'params.set("limit", String(limit))',
+        'params.set("offset", String((page - 1) * limit))',
+        "const total = Number(logs.total)",
+        "loadLogs(Number(button.dataset.page))",
+        "${currentLogPage} / ${totalPages} 페이지",
+        "setTimeout(() => loadLogs(1), 250)",
+        "async function findLogPage(logId)",
+        "const targetPage = await findLogPage(targetLogId)",
+        "return Math.floor(position / LOGS_PER_PAGE) + 1",
+    ):
+        assert marker in html
+
+    assert "fetch(\"/api/v1/logs?limit=200\")" not in html
+    assert "items.slice(startIndex" not in html
+    assert ">이전</button>" in html
+    assert ">다음</button>" in html
+
+
 def test_same_origin_dashboard_does_not_enable_wildcard_cors(client: TestClient) -> None:
     response = client.options(
         "/api/v1/logs",
@@ -1082,6 +1106,72 @@ def test_log_filters_and_filter_options(
     assert option_data["users"] == ["finance_user", "legal_user", "research_user"]
     assert option_data["agents"] == ["agent-finance", "agent-legal", "agent-research"]
     assert option_data["leak_channels"] == main.LEAK_CHANNELS
+
+
+def test_log_server_pagination_keeps_page_count_and_filtered_total(
+    client: TestClient,
+    agent_headers: dict[str, str],
+) -> None:
+    now = datetime.now(timezone.utc)
+    for index in range(205):
+        post_log(
+            client,
+            agent_headers,
+            make_log_payload(
+                f"pagination-{index:03d}",
+                timestamp=now - timedelta(seconds=index),
+                department="Paged" if index % 2 == 0 else "Other",
+            ),
+        )
+
+    default_page = client.get("/api/v1/logs")
+    assert default_page.status_code == 200
+    assert default_page.json()["count"] == 50
+    assert default_page.json()["total"] == 205
+    assert default_page.json()["limit"] == 50
+    assert default_page.json()["offset"] == 0
+
+    last_page = client.get("/api/v1/logs", params={"limit": 10, "offset": 200})
+    assert last_page.status_code == 200
+    last_page_data = last_page.json()
+    assert {
+        key: last_page_data[key]
+        for key in ("count", "total", "limit", "offset")
+    } == {
+        "count": 5,
+        "total": 205,
+        "limit": 10,
+        "offset": 200,
+    }
+    assert [item["event_id"] for item in last_page_data["items"]] == [
+        "pagination-200",
+        "pagination-201",
+        "pagination-202",
+        "pagination-203",
+        "pagination-204",
+    ]
+
+    filtered = client.get(
+        "/api/v1/logs",
+        params={"department": "Paged", "limit": 10, "offset": 100},
+    )
+    assert filtered.status_code == 200
+    assert filtered.json()["count"] == 3
+    assert filtered.json()["total"] == 103
+    assert filtered.json()["limit"] == 10
+    assert filtered.json()["offset"] == 100
+    assert [item["event_id"] for item in filtered.json()["items"]] == [
+        "pagination-200",
+        "pagination-202",
+        "pagination-204",
+    ]
+
+    beyond_end = client.get("/api/v1/logs", params={"limit": 10, "offset": 205})
+    assert beyond_end.status_code == 200
+    assert beyond_end.json()["items"] == []
+    assert beyond_end.json()["count"] == 0
+    assert beyond_end.json()["total"] == 205
+    assert client.get("/api/v1/logs", params={"offset": -1}).status_code == 422
 
 
 def test_dashboard_summary_uses_only_the_requested_recent_period(

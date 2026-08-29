@@ -163,7 +163,7 @@ Host 통합 검증기가 저장 후 `GET /api/v1/logs`로 readback할 때도 인
 | `GET` | `/api/v1/agent-check` | `X-Agent-Token` | 로그를 남기지 않고 Host 인증·연결 확인 |
 | `POST` | `/api/v1/analyze` | `X-Agent-Token` | Mock 또는 외부 AI 분석 요청 |
 | `POST` | `/api/v1/logs` | `X-Agent-Token` | Host Agent 탐지 로그 저장 |
-| `GET` | `/api/v1/logs` | HTTP Basic(활성 시) | 로그 검색 및 필터 조회 |
+| `GET` | `/api/v1/logs` | HTTP Basic(활성 시) | 로그 검색·필터와 서버 페이지 조회 |
 | `GET` | `/api/v1/logs/filter-options` | HTTP Basic(활성 시) | 부서·사용자·Agent 필터 목록 조회 |
 | `GET` | `/api/v1/logs/{log_id}` | HTTP Basic(활성 시) | 개별 로그 상세 조회 |
 | `GET` | `/api/v1/dashboard/summary` | HTTP Basic(활성 시) | 최근 기간 KPI와 차트 데이터 조회 |
@@ -172,6 +172,12 @@ Host 통합 검증기가 저장 후 `GET /api/v1/logs`로 readback할 때도 인
 | `POST` | `/api/v1/policies` | admin Basic(활성) / `X-Agent-Token`(비활성) | 정책 생성 |
 
 정확한 요청 필드와 허용값은 실행 중인 서버의 `/docs`에서 확인할 수 있습니다.
+
+`GET /api/v1/logs`는 기존 필터와 함께 `limit`(기본 50, 1~200) 및
+`offset`(기본 0, 0 이상)을 받습니다. 응답의 `count`는 현재 페이지 건수,
+`total`은 같은 필터에 맞는 전체 건수이며 적용된 `limit`과 `offset`도 함께
+반환합니다. 로그 화면은 이 API를 10건씩 요청하므로 200건을 넘는 이력도
+이전·다음 버튼으로 계속 조회할 수 있습니다.
 
 ### 6.1 준실시간 위험 알림
 
@@ -596,7 +602,7 @@ python -m pytest -q
 - Mock AI 분석
 - 로그 저장, 상세 조회와 실제 SQLite 반영
 - 동일 `event_id` 재전송 중복 방지
-- 로그 입력값 검증과 조합 필터
+- 로그 입력값 검증, 조합 필터와 200건 초과 서버 페이지 경계
 - 최근 기간 KPI, 차트 데이터와 날짜 경계
 - 고위험 알림 초기 기준선, 저위험 제외, 커서 페이징과 DB 세대 ID 기반 재생성 복구
 - 고위험 점수 임계값의 설정 경계와 알림·대시보드 요약 간 일치
@@ -660,5 +666,5 @@ python scripts/send_sample_log.py --scenario all --interval 2.5
 - `send_sample_log.py --scenario all`은 `PRINT`·`MESSENGER`를 포함한 Web 표시용 fixture 7건을 전송할 뿐입니다. 실제 Host 연동은 5개 채널이며, 메신저는 `CLIPBOARD` 경로로 검사하고 `PRINT`는 미지원입니다.
 - `send_sample_log.py`는 Windows의 USB·클립보드·이메일 등을 실제로 감지하거나 차단하지 않습니다.
 - Host Agent의 USB `BLOCKED`는 대상 파일의 사후 삭제가 실제로 성공한 경우에만 기록합니다. 삭제 직전·도중 파일이 없어졌거나, 분석 뒤 파일 지문이 바뀌었거나, 권한·잠금·드라이브 이탈로 삭제를 확인할 수 없으면 다른 파일을 삭제하지 않고 `WARNED`와 실패 사유로 기록합니다.
-- 로그 페이지네이션은 프론트에서 최대 200건을 받아 10건씩 표시하는 방식입니다.
+- 로그 화면은 SQLite `offset` 기반 서버 페이지네이션을 사용합니다. 로그가 매우 커져 큰 `offset` 조회가 병목이 되면 운영 DB 전환 시 커서 방식으로 교체해야 합니다.
 - 차트는 버전과 무결성 해시를 고정한 Chart.js CDN을 사용하므로 완전한 오프라인 환경에서는 차트만 표시되지 않습니다. CDN 로드가 실패해도 KPI·로그·실시간 알림·경고음은 계속 작동합니다.

@@ -738,8 +738,8 @@ async def read_root() -> dict:
 
 
 @app.get("/health")
-async def health_check() -> dict:
-    return {
+def health_check() -> dict:
+    health = {
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "analysis_mode": "external" if get_external_analyze_url() else "mock",
@@ -747,6 +747,26 @@ async def health_check() -> dict:
         "high_risk_score_threshold": HIGH_RISK_SCORE_THRESHOLD,
         "dashboard_auth_enabled": DASHBOARD_AUTH_ENABLED,
     }
+    try:
+        with closing(get_connection()) as connection:
+            database_epoch = connection.execute(
+                """
+                SELECT metadata_value
+                FROM dlp_metadata
+                WHERE metadata_key = ?
+                """,
+                (DATABASE_EPOCH_KEY,),
+            ).fetchone()
+    except sqlite3.Error:
+        database_epoch = None
+
+    if database_epoch is None:
+        health["status"] = "error"
+        health["database_status"] = "error"
+        return JSONResponse(status_code=503, content=health)
+
+    health["database_status"] = "ok"
+    return health
 
 
 @app.get("/api/v1/agent-check", dependencies=[Depends(verify_agent_token)])

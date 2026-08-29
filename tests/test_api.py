@@ -176,6 +176,7 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
     assert health.json()["ai_server_url_configured"] is False
     assert health.json()["high_risk_score_threshold"] == main.HIGH_RISK_SCORE_THRESHOLD
     assert health.json()["dashboard_auth_enabled"] is False
+    assert health.json()["database_status"] == "ok"
 
     for path in ("/dashboard", "/logs"):
         response = client.get(path)
@@ -186,6 +187,36 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
         assert 'id="analysisMode"' in response.text
         assert "Web 분석" in response.text
         assert "AI 모델 버전" in response.text
+
+
+def test_health_returns_503_without_exposing_database_errors(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable_database() -> sqlite3.Connection:
+        raise sqlite3.OperationalError("private database path must not be exposed")
+
+    monkeypatch.setattr(main, "get_connection", unavailable_database)
+
+    response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "error"
+    assert response.json()["database_status"] == "error"
+    assert "private database path" not in response.text
+
+
+def test_health_returns_503_when_database_epoch_is_missing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "DATABASE_EPOCH_KEY", "missing-database-epoch")
+
+    response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "error"
+    assert response.json()["database_status"] == "error"
 
 
 def test_dashboard_auth_configuration_is_disabled_only_when_all_values_are_empty() -> None:
@@ -1580,8 +1611,9 @@ def test_public_example_tokens_are_rejected(token: str) -> None:
         main.require_ascii_token("TEST_TOKEN", token)
 
 
-def test_database_routes_run_off_the_event_loop(
+def test_health_database_check_runs_off_the_event_loop(
     client: TestClient,
+    agent_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection_started = Event()
@@ -1595,14 +1627,18 @@ def test_database_routes_run_off_the_event_loop(
 
     monkeypatch.setattr(main, "get_connection", slow_get_connection)
     with ThreadPoolExecutor(max_workers=2) as executor:
-        logs_future = executor.submit(client.get, "/api/v1/logs")
-        assert connection_started.wait(timeout=1)
         health_future = executor.submit(client.get, "/health")
+        assert connection_started.wait(timeout=1)
+        agent_check_future = executor.submit(
+            client.get,
+            "/api/v1/agent-check",
+            headers=agent_headers,
+        )
         try:
-            assert health_future.result(timeout=1).status_code == 200
+            assert agent_check_future.result(timeout=1).status_code == 200
         finally:
             release_connection.set()
-        assert logs_future.result(timeout=2).status_code == 200
+        assert health_future.result(timeout=2).status_code == 200
 
 
 def test_log_timestamp_requires_an_explicit_utc_offset(

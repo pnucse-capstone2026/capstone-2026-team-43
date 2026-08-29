@@ -119,7 +119,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --env-file .env
 | Swagger API 문서 | `http://127.0.0.1:8000/docs` |
 | 상태 확인 | `http://127.0.0.1:8000/health` |
 
-`/health`의 `analysis_mode`가 `mock`이면 내부 Mock 분석, `external`이면 외부 AI 서버 전달 모드입니다. `dashboard_auth_enabled`로 비밀값 노출 없이 대시보드 인증 활성 여부를 확인할 수 있습니다.
+`/health`의 `analysis_mode`가 `mock`이면 내부 Mock 분석, `external`이면 외부 AI 서버 전달 모드입니다. `database_status` 값이 `ok`인지 확인해 SQLite 메타데이터를 읽을 수 있는지 점검할 수 있으며, DB 연결 오류나 세대 ID 누락 시 경로나 예외 내용을 노출하지 않고 HTTP `503`을 반환합니다. `dashboard_auth_enabled`로 비밀값 노출 없이 대시보드 인증 활성 여부를 확인할 수 있습니다.
 
 ### 5.3 두 컴퓨터 시연
 
@@ -159,7 +159,7 @@ Host 통합 검증기가 저장 후 `GET /api/v1/logs`로 readback할 때도 인
 
 | Method | Path | 인증 | 용도 |
 | --- | --- | --- | --- |
-| `GET` | `/health` | 불필요 | 서버와 AI 분석 모드 확인 |
+| `GET` | `/health` | 불필요 | 서버·SQLite 준비 상태와 AI 분석 모드 확인 |
 | `GET` | `/api/v1/agent-check` | `X-Agent-Token` | 로그를 남기지 않고 Host 인증·연결 확인 |
 | `POST` | `/api/v1/analyze` | `X-Agent-Token` | Mock 또는 외부 AI 분석 요청 |
 | `POST` | `/api/v1/logs` | `X-Agent-Token` | Host Agent 탐지 로그 저장 |
@@ -590,7 +590,7 @@ python -m pytest -q
 
 - 테스트마다 `tmp_path` 아래 독립된 SQLite DB 생성
 - 테이블 생성과 기본 정책 시드
-- 대시보드·로그 화면과 헬스체크
+- 대시보드·로그 화면과 SQLite 준비 상태 헬스체크
 - Agent 토큰 인증 성공·실패
 - 대시보드 인증 설정 fail-fast, viewer/admin 조회 권한과 정책 쓰기 403
 - Mock AI 분석

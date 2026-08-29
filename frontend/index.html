@@ -4,7 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>민감정보 파일 반출 탐지를 위한 AI 기반 Host DLP 시스템</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"
+        integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ"
+        crossorigin="anonymous"
+    ></script>
     <style>
         :root {
             --bg: #f5f8fc;
@@ -1097,6 +1101,7 @@
                 </div>
                 <div class="topbar-meta">
                     <span class="status-pill"><span class="status-dot"></span> API <strong id="apiStatus">확인 중</strong></span>
+                    <span class="status-pill">Web 분석 <strong id="analysisMode">확인 중</strong></span>
                     <span class="status-pill">최근 조회 <strong id="lastUpdated">-</strong></span>
                     <span class="status-pill">최다 채널 <strong id="topChannel">-</strong></span>
                     <button class="status-pill status-button" id="alertSoundToggle" type="button" aria-pressed="false">
@@ -1112,7 +1117,7 @@
                         <h2>민감정보 파일 반출 탐지를 위한<br>AI 기반 Host DLP 시스템</h2>
                         <p class="hero-copy">
                             Host Agent가 수집한 이벤트와 AI 민감도 분석 결과를 통합해서 보여주는 관리자 대시보드입니다.<br>
-                            차단 현황, 채널 분포, 부서별 위험도와 상세 탐지 근거를 빠르게 확인할 수 있습니다.
+                            차단 현황, 채널 분포, 부서별 탐지 건수와 상세 탐지 근거를 빠르게 확인할 수 있습니다.
                         </p>
                         <div class="hero-actions">
                             <a class="button primary" href="/logs">로그 상세 분석 보기</a>
@@ -1154,7 +1159,7 @@
                         <div class="kpi-foot">0.00 ~ 1.00 스케일</div>
                     </div>
                     <div class="panel metric-card span-3">
-                        <div class="kpi-title">최다 위험 부서</div>
+                        <div class="kpi-title">최다 탐지 부서</div>
                         <div class="kpi-value" id="topDepartment">-</div>
                         <div class="kpi-foot">탐지 건수 기준 상위 부서</div>
                     </div>
@@ -1205,7 +1210,7 @@
                         <div class="section-head">
                             <div class="section-title">
                                 <span class="section-kicker">Department</span>
-                                <h3>부서별 위험도</h3>
+                                <h3>부서별 탐지 건수</h3>
                             </div>
                             <span class="pill">상위 5개</span>
                         </div>
@@ -1319,7 +1324,16 @@
 
         setPage(currentPage);
 
-        const timelineChart = new Chart(document.getElementById("timelineChart"), {
+        function createDashboardChart(canvasId, config) {
+            if (typeof window.Chart !== "function") {
+                console.warn("Chart.js를 불러오지 못해 차트만 비활성화합니다.");
+                document.getElementById(canvasId).hidden = true;
+                return null;
+            }
+            return new window.Chart(document.getElementById(canvasId), config);
+        }
+
+        const timelineChart = createDashboardChart("timelineChart", {
             type: "line",
             data: {
                 labels: [],
@@ -1352,7 +1366,7 @@
             }
         });
 
-        const channelChart = new Chart(document.getElementById("channelChart"), {
+        const channelChart = createDashboardChart("channelChart", {
             type: "doughnut",
             data: {
                 labels: [],
@@ -1409,13 +1423,17 @@
                 : 0;
             setText("blockedRate", `${blockedRate}%`);
 
-            timelineChart.data.labels = summary.timeline.map(item => item.date.slice(5));
-            timelineChart.data.datasets[0].data = summary.timeline.map(item => item.count);
-            timelineChart.update();
+            if (timelineChart) {
+                timelineChart.data.labels = summary.timeline.map(item => item.date.slice(5));
+                timelineChart.data.datasets[0].data = summary.timeline.map(item => item.count);
+                timelineChart.update();
+            }
 
-            channelChart.data.labels = summary.channel_breakdown.map(item => item.channel);
-            channelChart.data.datasets[0].data = summary.channel_breakdown.map(item => item.count);
-            channelChart.update();
+            if (channelChart) {
+                channelChart.data.labels = summary.channel_breakdown.map(item => item.channel);
+                channelChart.data.datasets[0].data = summary.channel_breakdown.map(item => item.count);
+                channelChart.update();
+            }
 
             renderDepartmentRanking(summary.top_departments);
             renderHighRiskEvents(summary.high_risk_events || []);
@@ -1432,6 +1450,18 @@
                 dashboardSummaryRenderGeneration = generation;
                 renderDashboardSummary(summary);
             }
+        }
+
+        async function refreshDashboardData() {
+            const [, logsResponse] = await Promise.all([
+                refreshDashboardSummary(),
+                fetch("/api/v1/logs?limit=50", { cache: "no-store" })
+            ]);
+            if (!logsResponse.ok) {
+                throw new Error(`Recent logs request failed: ${logsResponse.status}`);
+            }
+            const logs = await logsResponse.json();
+            renderRecentLogs(logs.items || []);
         }
 
         function hideRealtimeRiskAlert() {
@@ -1471,14 +1501,22 @@
                 return;
             }
 
-            alertSoundEnabled = !alertSoundEnabled;
-            if (alertSoundEnabled) {
-                alertAudioContext ||= new AudioContextClass();
-                if (alertAudioContext.state === "suspended") {
-                    await alertAudioContext.resume();
+            const shouldEnable = !alertSoundEnabled;
+            try {
+                if (shouldEnable) {
+                    alertAudioContext ||= new AudioContextClass();
+                    if (alertAudioContext.state === "suspended") {
+                        await alertAudioContext.resume();
+                    }
                 }
+            } catch (error) {
+                alertSoundEnabled = false;
+                setText("alertSoundStatus", "사용 불가");
+                console.warn("경고음을 활성화하지 못했습니다.", error);
+                return;
             }
 
+            alertSoundEnabled = shouldEnable;
             const toggle = document.getElementById("alertSoundToggle");
             toggle.setAttribute("aria-pressed", String(alertSoundEnabled));
             setText("alertSoundStatus", alertSoundEnabled ? "켬" : "끔");
@@ -1563,6 +1601,7 @@
                 const result = await response.json();
                 const items = Array.isArray(result.items) ? result.items : [];
                 const nextCursor = Number(result.next_cursor);
+                const previousCursor = riskAlertCursor;
                 const nextCursorEpoch = typeof result.cursor_epoch === "string"
                     ? result.cursor_epoch.trim()
                     : "";
@@ -1574,6 +1613,11 @@
                 }
                 const cursorEpochChanged = riskAlertCursorEpoch !== null
                     && riskAlertCursorEpoch !== nextCursorEpoch;
+                const cursorAdvanced = previousCursor !== null && (
+                    result.cursor_reset === true
+                    || cursorEpochChanged
+                    || nextCursor > previousCursor
+                );
                 if (result.cursor_reset === true || cursorEpochChanged) {
                     riskAlertCursor = nextCursor;
                 } else {
@@ -1582,11 +1626,13 @@
                 riskAlertCursorEpoch = nextCursorEpoch;
                 riskPollFailureCount = 0;
 
+                if (cursorAdvanced) {
+                    refreshDashboardData().catch(error => {
+                        console.warn("신규 이벤트 반영 후 대시보드 갱신 실패", error);
+                    });
+                }
                 if (items.length) {
                     showRealtimeRiskAlert(items);
-                    refreshDashboardSummary().catch(error => {
-                        console.warn("고위험 이벤트 반영 후 대시보드 갱신 실패", error);
-                    });
                 }
             } catch (error) {
                 if (error.name !== "AbortError" || requestTimedOut) {
@@ -1640,7 +1686,7 @@
                         <strong>${index + 1}. ${escapeHtml(item.department)}</strong>
                         <div class="detail-muted">${item.count}건 탐지</div>
                     </div>
-                    <div class="ranking-score">${Math.max(10, item.count * 10)}점</div>
+                    <div class="ranking-score">${item.count}건</div>
                 </div>
             `).join("");
         }
@@ -2003,7 +2049,7 @@
             if (startDate) params.set("start_date", startDate);
             if (endDate) params.set("end_date", endDate);
             if (keyword) params.set("q", keyword);
-            params.set("limit", "50");
+            params.set("limit", "200");
 
             return `/api/v1/logs?${params.toString()}`;
         }
@@ -2056,6 +2102,7 @@
                 ]);
 
                 setText("apiStatus", health.status.toUpperCase());
+                setText("analysisMode", String(health.analysis_mode || "unknown").toUpperCase());
                 if (summaryGeneration > dashboardSummaryRenderGeneration) {
                     dashboardSummaryRenderGeneration = summaryGeneration;
                     renderDashboardSummary(summary);
@@ -2069,6 +2116,7 @@
                 }
             } catch (error) {
                 setText("apiStatus", "ERROR");
+                setText("analysisMode", "ERROR");
                 setText("logMeta", "로그 정보를 불러오지 못했습니다.");
                 document.getElementById("logTableWrap").innerHTML =
                     '<div class="empty">API 연결에 실패했습니다. FastAPI 서버가 실행 중인지 확인해주세요.</div>';

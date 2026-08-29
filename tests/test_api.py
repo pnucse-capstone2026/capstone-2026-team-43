@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import inspect
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
+from threading import Event
 from urllib.error import URLError
 
 import pytest
+from pydantic import ValidationError
 from fastapi.testclient import TestClient
 
 from backend import main
@@ -165,7 +169,29 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
         assert "AI 기반 Host DLP 시스템" in response.text
         assert 'value="CLIPBOARD"' in response.text
         assert 'value="CLOUD_DRIVE"' in response.text
+        assert 'id="analysisMode"' in response.text
+        assert "Web 분석" in response.text
         assert "AI 모델 버전" in response.text
+
+
+def test_agent_connection_check_verifies_token_without_creating_log(
+    client: TestClient,
+) -> None:
+    rejected = client.get("/api/v1/agent-check")
+    wrong_token = client.get(
+        "/api/v1/agent-check",
+        headers={"X-Agent-Token": "wrong-agent-token"},
+    )
+    accepted = client.get(
+        "/api/v1/agent-check",
+        headers={"X-Agent-Token": main.AGENT_API_TOKEN},
+    )
+
+    assert rejected.status_code == 401
+    assert wrong_token.status_code == 401
+    assert accepted.status_code == 200
+    assert accepted.json() == {"status": "ok", "agent_token": "accepted"}
+    assert client.get("/api/v1/logs").json()["count"] == 0
 
 
 def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
@@ -177,14 +203,192 @@ def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
         'id="alertSoundToggle"',
         "const RISK_POLL_INTERVAL_MS = 2000",
         "function pollRealtimeRiskAlerts",
+        "async function refreshDashboardData()",
+        "function createDashboardChart",
+        'typeof window.Chart !== "function"',
+        "if (timelineChart) {",
+        "if (channelChart) {",
         'fetch(`/api/v1/alerts?',
         'query.set("cursor_epoch", riskAlertCursorEpoch)',
         "startRiskPolling();\n        loadDashboard();",
         "result.cursor_reset === true || cursorEpochChanged",
+        "const previousCursor = riskAlertCursor",
+        "const cursorAdvanced = previousCursor !== null",
+        "if (cursorAdvanced) {",
+        "refreshDashboardData().catch",
+        'setText("analysisMode", String(health.analysis_mode || "unknown").toUpperCase())',
     ):
         assert marker in html
 
     assert "setInterval(loadDashboard" not in html
+    assert html.index("if (cursorAdvanced) {") < html.index("if (items.length) {")
+    assert html.index("alertSoundEnabled = shouldEnable") > html.index("await alertAudioContext.resume()")
+    assert 'setText("alertSoundStatus", "사용 불가")' in html
+    assert 'console.warn("경고음을 활성화하지 못했습니다.", error)' in html
+
+
+def test_same_origin_dashboard_does_not_enable_wildcard_cors(client: TestClient) -> None:
+    response = client.options(
+        "/api/v1/logs",
+        headers={
+            "Origin": "https://untrusted.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_frontend_pins_chart_dependency_with_integrity(client: TestClient) -> None:
+    html = client.get("/dashboard").text
+
+    assert "chart.js@4.5.1/dist/chart.umd.min.js" in html
+    assert (
+        'integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+'
+        '6DChMTBJemed7ZnvJ"'
+    ) in html
+    assert "crossorigin=\"anonymous\"" in html
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "field"),
+    [
+        (
+            "/api/v1/logs",
+            {**make_log_payload("too-many-keywords"), "matched_keywords": ["k"] * 101},
+            "matched_keywords",
+        ),
+        (
+            "/api/v1/analyze",
+            {**make_analyze_payload("too-many-patterns"), "matched_patterns": ["p"] * 101},
+            "matched_patterns",
+        ),
+        (
+            "/api/v1/analyze",
+            {**make_analyze_payload("too-much-metadata"), "metadata": {f"k{i}": i for i in range(51)}},
+            "metadata",
+        ),
+        (
+            "/api/v1/policies",
+            {
+                "policy_name": "too-many-extensions",
+                "ai_threshold": 0.4,
+                "block_threshold": 0.8,
+                "exception_extensions": [f"x{i}" for i in range(51)],
+            },
+            "exception_extensions",
+        ),
+    ],
+)
+def test_agent_payload_collections_have_size_limits(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    endpoint: str,
+    payload: dict,
+    field: str,
+) -> None:
+    response = client.post(endpoint, json=payload, headers=agent_headers)
+
+    assert response.status_code == 422
+    assert any(item["loc"][-1] == field for item in response.json()["detail"])
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload", "field"),
+    [
+        (
+            "/api/v1/logs",
+            {**make_log_payload("long-keyword"), "matched_keywords": ["k" * 101]},
+            "matched_keywords",
+        ),
+        (
+            "/api/v1/analyze",
+            {**make_analyze_payload("long-pattern"), "matched_patterns": ["p" * 101]},
+            "matched_patterns",
+        ),
+        (
+            "/api/v1/analyze",
+            {**make_analyze_payload("long-metadata"), "metadata": {"detail": "v" * 501}},
+            "metadata",
+        ),
+        (
+            "/api/v1/analyze",
+            {**make_analyze_payload("long-metadata-key"), "metadata": {"k" * 101: "value"}},
+            "metadata",
+        ),
+        (
+            "/api/v1/policies",
+            {
+                "policy_name": "long-extension",
+                "ai_threshold": 0.4,
+                "block_threshold": 0.8,
+                "exception_extensions": ["e" * 21],
+            },
+            "exception_extensions",
+        ),
+    ],
+)
+def test_agent_payload_collection_items_have_length_limits(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    endpoint: str,
+    payload: dict,
+    field: str,
+) -> None:
+    response = client.post(endpoint, json=payload, headers=agent_headers)
+
+    assert response.status_code == 422
+    assert any(field in item["loc"] for item in response.json()["detail"])
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "payload"),
+    [
+        ("/api/v1/logs", {**make_log_payload("extra-log-field"), "typo_field": True}),
+        ("/api/v1/analyze", {**make_analyze_payload("extra-analysis-field"), "typo_field": True}),
+        (
+            "/api/v1/policies",
+            {
+                "policy_name": "extra-policy-field",
+                "ai_threshold": 0.4,
+                "block_threshold": 0.8,
+                "typo_field": True,
+            },
+        ),
+    ],
+)
+def test_write_contracts_reject_unknown_fields(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    endpoint: str,
+    payload: dict,
+) -> None:
+    response = client.post(endpoint, json=payload, headers=agent_headers)
+
+    assert response.status_code == 422
+    assert any(item["loc"][-1] == "typo_field" for item in response.json()["detail"])
+
+
+def test_analysis_metadata_rejects_non_finite_numbers() -> None:
+    with pytest.raises(ValidationError):
+        main.AnalyzeRequest(
+            **{
+                **make_analyze_payload("non-finite-metadata"),
+                "metadata": {"score": float("nan")},
+            }
+        )
+
+
+@pytest.mark.parametrize("token", ["short", "가" * 32])
+def test_configured_tokens_must_be_long_ascii_values(token: str) -> None:
+    with pytest.raises(RuntimeError):
+        main.require_ascii_token("TEST_TOKEN", token)
+
+    assert main.require_ascii_token("TEST_TOKEN", "a" * 32) is None
+
+
+def test_external_analysis_endpoint_uses_fastapi_worker_thread() -> None:
+    assert inspect.iscoroutinefunction(main.analyze_event) is False
 
 
 @pytest.mark.parametrize("token", [None, "wrong-token"])
@@ -743,6 +947,7 @@ def test_dashboard_summary_includes_the_first_day_from_midnight(
 
 def test_policy_create_and_threshold_validation(
     client: TestClient,
+    agent_headers: dict[str, str],
     temp_db_path: Path,
 ) -> None:
     initial = client.get("/api/v1/policies")
@@ -751,6 +956,7 @@ def test_policy_create_and_threshold_validation(
 
     valid_response = client.post(
         "/api/v1/policies",
+        headers=agent_headers,
         json={
             "policy_name": "테스트 정책",
             "description": "자동화 테스트용 정책",
@@ -762,6 +968,7 @@ def test_policy_create_and_threshold_validation(
     )
     invalid_response = client.post(
         "/api/v1/policies",
+        headers=agent_headers,
         json={
             "policy_name": "잘못된 정책",
             "ai_threshold": 0.9,
@@ -778,6 +985,27 @@ def test_policy_create_and_threshold_validation(
     assert count == 3
 
 
+@pytest.mark.parametrize("token", [None, "wrong-token"])
+def test_policy_create_requires_agent_token(
+    client: TestClient,
+    token: str | None,
+) -> None:
+    headers = {"X-Agent-Token": token} if token else {}
+
+    response = client.post(
+        "/api/v1/policies",
+        headers=headers,
+        json={
+            "policy_name": "unauthorized-policy",
+            "ai_threshold": 0.6,
+            "block_threshold": 0.8,
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid or missing agent token."
+
+
 class FakeExternalResponse:
     def __init__(self, payload: object) -> None:
         self.body = json.dumps(payload).encode("utf-8")
@@ -788,8 +1016,55 @@ class FakeExternalResponse:
     def __exit__(self, *args: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self.body
+    def read(self, size: int = -1) -> bytes:
+        return self.body if size < 0 else self.body[:size]
+
+
+class FakeRawExternalResponse(FakeExternalResponse):
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+
+def test_slow_external_ai_does_not_block_health_requests(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ai_call_started = Event()
+    release_ai_call = Event()
+
+    def slow_urlopen(request: object, timeout: float) -> FakeExternalResponse:
+        ai_call_started.set()
+        assert release_ai_call.wait(timeout=2)
+        return FakeExternalResponse(
+            {
+                "event_id": "slow-external-ai",
+                "decision": "allow",
+                "confidence_score": 0.12,
+                "model_version": "koelectra-dlp-v7",
+                "latency_ms": 1200,
+                "reason": "normal context",
+            }
+        )
+
+    monkeypatch.setattr(main, "AI_SERVER_URL", "http://slow-ai.example")
+    monkeypatch.setattr(main, "urlopen", slow_urlopen)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        analyze_future = executor.submit(
+            client.post,
+            "/api/v1/analyze",
+            json=make_analyze_payload("slow-external-ai"),
+            headers=agent_headers,
+        )
+        assert ai_call_started.wait(timeout=1)
+        health_future = executor.submit(client.get, "/health")
+        try:
+            assert health_future.result(timeout=1).status_code == 200
+        finally:
+            release_ai_call.set()
+
+        assert analyze_future.result(timeout=2).status_code == 200
 
 
 @pytest.mark.parametrize("channel", ["smtp", "web_mail", "file_guard"])
@@ -948,6 +1223,32 @@ def test_external_ai_identity_contract_violations_return_502(
             "confidence_score": "not-a-number",
             "model_version": "team-ai-v1",
         },
+        {
+            "event_id": "analyze-test-001",
+            "decision": "block",
+            "confidence_score": True,
+            "model_version": "team-ai-v1",
+        },
+        {
+            "event_id": "analyze-test-001",
+            "decision": "allow",
+            "confidence_score": 0.1,
+            "model_version": "team-ai-v1",
+            "latency_ms": 600001,
+        },
+        {
+            "event_id": "analyze-test-001",
+            "decision": "allow",
+            "confidence_score": 0.1,
+            "model_version": "m" * 101,
+        },
+        {
+            "event_id": "analyze-test-001",
+            "decision": "allow",
+            "confidence_score": 0.1,
+            "model_version": "team-ai-v1",
+            "reason": "r" * 501,
+        },
     ],
 )
 def test_invalid_external_ai_responses_return_502(
@@ -991,6 +1292,142 @@ def test_external_ai_connection_failure_returns_502(
 
     assert response.status_code == 502
     assert "Could not connect to AI server" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("body", "detail"),
+    [
+        (b"x" * (main.MAX_AI_RESPONSE_BYTES + 1), "too large"),
+        (b"\xff\xfe", "not UTF-8"),
+    ],
+)
+def test_external_ai_rejects_unbounded_or_invalid_response_bodies(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    body: bytes,
+    detail: str,
+) -> None:
+    monkeypatch.setattr(main, "AI_SERVER_URL", "http://team-ai.local")
+    monkeypatch.setattr(
+        main,
+        "urlopen",
+        lambda request, timeout: FakeRawExternalResponse(body),
+    )
+
+    response = client.post(
+        "/api/v1/analyze",
+        json=make_analyze_payload(),
+        headers=agent_headers,
+    )
+
+    assert response.status_code == 502
+    assert detail in response.json()["detail"]
+
+
+def test_non_ascii_agent_token_is_rejected_as_unauthorized() -> None:
+    with pytest.raises(main.HTTPException) as error:
+        main.verify_agent_token("가" * 32)
+
+    assert error.value.status_code == 401
+
+
+@pytest.mark.parametrize("token", sorted(main.UNSAFE_TOKEN_VALUES))
+def test_public_example_tokens_are_rejected(token: str) -> None:
+    with pytest.raises(RuntimeError):
+        main.require_ascii_token("TEST_TOKEN", token)
+
+
+def test_database_routes_run_off_the_event_loop(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_started = Event()
+    release_connection = Event()
+    original_get_connection = main.get_connection
+
+    def slow_get_connection() -> sqlite3.Connection:
+        connection_started.set()
+        assert release_connection.wait(timeout=2)
+        return original_get_connection()
+
+    monkeypatch.setattr(main, "get_connection", slow_get_connection)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        logs_future = executor.submit(client.get, "/api/v1/logs")
+        assert connection_started.wait(timeout=1)
+        health_future = executor.submit(client.get, "/health")
+        try:
+            assert health_future.result(timeout=1).status_code == 200
+        finally:
+            release_connection.set()
+        assert logs_future.result(timeout=2).status_code == 200
+
+
+def test_log_timestamp_requires_an_explicit_utc_offset(
+    client: TestClient,
+    agent_headers: dict[str, str],
+) -> None:
+    payload = make_log_payload("naive-timestamp")
+    payload["timestamp"] = "2026-08-29T00:30:00"
+
+    response = client.post("/api/v1/logs", json=payload, headers=agent_headers)
+
+    assert response.status_code == 422
+
+
+def test_matched_keywords_round_trip_commas_without_corruption(
+    client: TestClient,
+    agent_headers: dict[str, str],
+) -> None:
+    payload = make_log_payload("keyword-comma")
+    payload["matched_keywords"] = ["last,name", "contract"]
+    created = client.post("/api/v1/logs", json=payload, headers=agent_headers)
+
+    detail = client.get(f"/api/v1/logs/{created.json()['log_id']}")
+
+    assert created.status_code == 201
+    assert detail.json()["matched_keywords"] == ["last,name", "contract"]
+
+
+def test_legacy_comma_separated_keywords_remain_readable(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    temp_db_path: Path,
+) -> None:
+    created = client.post(
+        "/api/v1/logs",
+        json=make_log_payload("legacy-keywords"),
+        headers=agent_headers,
+    )
+    assert created.status_code == 201
+    log_id = created.json()["log_id"]
+    with sqlite3.connect(temp_db_path) as connection:
+        connection.execute(
+            "UPDATE dlp_logs SET matched_keywords = ? WHERE log_id = ?",
+            ("rrn,email", log_id),
+        )
+
+    detail = client.get(f"/api/v1/logs/{log_id}")
+
+    assert detail.status_code == 200
+    assert detail.json()["matched_keywords"] == ["rrn", "email"]
+
+
+def test_dashboard_summary_excludes_future_events(
+    client: TestClient,
+    agent_headers: dict[str, str],
+) -> None:
+    future = datetime.now(timezone.utc) + timedelta(days=365)
+    post_log(
+        client,
+        agent_headers,
+        make_log_payload("future-event", timestamp=future),
+    )
+
+    summary = client.get("/api/v1/dashboard/summary", params={"days": 7}).json()
+
+    assert summary["kpis"]["total_events"] == 0
+    assert sum(item["count"] for item in summary["timeline"]) == 0
 
 
 def test_unknown_log_returns_404(client: TestClient) -> None:

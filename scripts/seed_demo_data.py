@@ -16,6 +16,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend import main as backend_main
 
 
+FIXTURE_MODEL_VERSION = "demo-fixture-not-live"
+FIXTURE_PREFIX = "[DEMO FIXTURE - NOT LIVE]"
+
+
 DEMO_SCENARIOS = (
     {
         "day_offset": 0,
@@ -251,8 +255,10 @@ def build_demo_logs(base_date: date | None = None) -> list[dict]:
                 "model_version": (
                     None
                     if scenario["detection_type"] == "RULE_BASED"
-                    else "koelectra-dlp-v7"
+                    else FIXTURE_MODEL_VERSION
                 ),
+                "decision_reason": f"{FIXTURE_PREFIX} {scenario['decision_reason']}",
+                "evidence_summary": f"{FIXTURE_PREFIX} {scenario['evidence_summary']}",
             }
         )
 
@@ -274,6 +280,7 @@ def seed_demo_data(db_path: Path, base_date: date | None = None) -> dict:
     initialize_database(target_path)
     received_at = datetime.now(timezone.utc).isoformat()
     inserted = 0
+    updated = 0
 
     with sqlite3.connect(target_path) as connection:
         for raw_log in logs:
@@ -303,7 +310,7 @@ def seed_demo_data(db_path: Path, base_date: date | None = None) -> dict:
                     log.leak_channel,
                     log.detection_type,
                     log.ai_score,
-                    ",".join(log.matched_keywords),
+                    json.dumps(log.matched_keywords, ensure_ascii=False),
                     log.model_version,
                     log.policy_id,
                     log.action_taken,
@@ -313,13 +320,37 @@ def seed_demo_data(db_path: Path, base_date: date | None = None) -> dict:
                 ),
             )
             inserted += cursor.rowcount
+            if cursor.rowcount == 0:
+                update_cursor = connection.execute(
+                    """
+                    UPDATE dlp_logs
+                    SET model_version = ?, decision_reason = ?, evidence_summary = ?
+                    WHERE event_id = ?
+                      AND (
+                        model_version IS NOT ?
+                        OR decision_reason IS NOT ?
+                        OR evidence_summary IS NOT ?
+                      )
+                    """,
+                    (
+                        log.model_version,
+                        log.decision_reason,
+                        log.evidence_summary,
+                        log.event_id,
+                        log.model_version,
+                        log.decision_reason,
+                        log.evidence_summary,
+                    ),
+                )
+                updated += update_cursor.rowcount
 
     return {
         "database": str(target_path),
         "base_date": (base_date or datetime.now(timezone.utc).date()).isoformat(),
         "requested": len(logs),
         "inserted": inserted,
-        "skipped": len(logs) - inserted,
+        "updated": updated,
+        "skipped": len(logs) - inserted - updated,
     }
 
 

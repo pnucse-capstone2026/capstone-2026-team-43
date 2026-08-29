@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from collections import Counter
@@ -9,15 +10,14 @@ from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from secrets import compare_digest
 from time import perf_counter
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -31,6 +31,28 @@ AI_SERVER_TOKEN = os.getenv("AI_SERVER_TOKEN", "").strip()
 AI_SERVER_TIMEOUT_SECONDS = float(os.getenv("AI_SERVER_TIMEOUT_SECONDS", "5"))
 HIGH_RISK_SCORE_THRESHOLD = 0.85
 DATABASE_EPOCH_KEY = "database_epoch"
+MAX_AI_RESPONSE_BYTES = 64 * 1024
+UNSAFE_TOKEN_VALUES = {
+    "replace-with-a-long-random-token",
+    "replace-with-ai-server-random-token",
+}
+
+
+def require_ascii_token(name: str, value: str) -> None:
+    try:
+        token_bytes = value.encode("ascii")
+    except UnicodeEncodeError as error:
+        raise RuntimeError(f"{name} must be an ASCII random token.") from error
+    if len(token_bytes) < 32 or value in UNSAFE_TOKEN_VALUES:
+        raise RuntimeError(f"{name} must contain at least 32 ASCII characters.")
+
+
+if AGENT_API_TOKEN != DEFAULT_AGENT_API_TOKEN:
+    require_ascii_token("AGENT_API_TOKEN", AGENT_API_TOKEN)
+if AI_SERVER_URL:
+    require_ascii_token("AI_SERVER_TOKEN", AI_SERVER_TOKEN)
+if not math.isfinite(AI_SERVER_TIMEOUT_SECONDS) or AI_SERVER_TIMEOUT_SECONDS <= 0:
+    raise RuntimeError("AI_SERVER_TIMEOUT_SECONDS must be a positive finite number.")
 
 LEAK_CHANNELS = [
     "USB_COPY",
@@ -41,6 +63,11 @@ LEAK_CHANNELS = [
     "CLIPBOARD",
     "CLOUD_DRIVE",
 ]
+
+MatchedItem = Annotated[str, Field(min_length=1, max_length=100)]
+ExtensionItem = Annotated[str, Field(min_length=1, max_length=20)]
+MetadataKey = Annotated[str, Field(min_length=1, max_length=100)]
+MetadataString = Annotated[str, Field(max_length=500)]
 
 
 @asynccontextmanager
@@ -55,16 +82,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
 class LogCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
     event_id: str | None = Field(default=None, min_length=1, max_length=120)
     agent_id: str | None = Field(default=None, min_length=1, max_length=100)
     timestamp: datetime
@@ -87,15 +107,24 @@ class LogCreate(BaseModel):
     detection_type: Literal["RULE_BASED", "AI_MODEL", "HYBRID"]
     ai_score: float = Field(..., ge=0.0, le=1.0)
     model_version: str | None = Field(default=None, max_length=100)
-    matched_keywords: list[str] = Field(default_factory=list)
+    matched_keywords: list[MatchedItem] = Field(default_factory=list, max_length=100)
     policy_id: str | None = Field(default=None, max_length=100)
     action_taken: Literal["BLOCKED", "WARNED", "ALLOWED"]
     decision_reason: str | None = Field(default=None, max_length=500)
     evidence_summary: str = Field(default="", max_length=500)
     latency_ms: int | None = Field(default=None, ge=0, le=600000)
 
+    @field_validator("timestamp")
+    @classmethod
+    def timestamp_must_include_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must include a UTC offset")
+        return value
+
 
 class AnalyzeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
     event_id: str = Field(..., min_length=1, max_length=120)
     channel: Literal[
         "clipboard",
@@ -112,9 +141,12 @@ class AnalyzeRequest(BaseModel):
         "messenger",
     ]
     user_id: str = Field(..., min_length=1, max_length=100)
-    matched_patterns: list[str] = Field(default_factory=list)
+    matched_patterns: list[MatchedItem] = Field(default_factory=list, max_length=100)
     snippet: str = Field(..., min_length=1, max_length=4000)
-    metadata: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+    metadata: dict[
+        MetadataKey,
+        MetadataString | int | float | bool | None,
+    ] = Field(default_factory=dict, max_length=50)
 
 
 class AnalyzeResponse(BaseModel):
@@ -128,18 +160,27 @@ class AnalyzeResponse(BaseModel):
 
 
 class PolicyCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
     policy_name: str = Field(..., min_length=1, max_length=100)
     description: str = Field(default="", max_length=300)
     ai_threshold: float = Field(..., ge=0.0, le=1.0)
     block_threshold: float = Field(..., ge=0.0, le=1.0)
     is_active: bool = True
-    exception_extensions: list[str] = Field(default_factory=list)
+    exception_extensions: list[ExtensionItem] = Field(default_factory=list, max_length=50)
 
 
 def verify_agent_token(
     x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
 ) -> None:
-    if not x_agent_token or not compare_digest(x_agent_token, AGENT_API_TOKEN):
+    try:
+        provided_token = (x_agent_token or "").encode("ascii")
+    except UnicodeEncodeError:
+        provided_token = b""
+    if not provided_token or not compare_digest(
+        provided_token,
+        AGENT_API_TOKEN.encode("ascii"),
+    ):
         raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
 
 
@@ -261,6 +302,8 @@ def normalize_external_analyze_response(payload: AnalyzeRequest, raw_response: A
         "confidence_score",
         raw_response.get("ai_score", raw_response.get("score")),
     )
+    if isinstance(raw_score, bool):
+        raise HTTPException(status_code=502, detail="AI server response has an invalid score.")
     try:
         confidence_score = float(raw_score)
     except (TypeError, ValueError) as error:
@@ -268,38 +311,62 @@ def normalize_external_analyze_response(payload: AnalyzeRequest, raw_response: A
 
     if 1.0 < confidence_score <= 100.0:
         confidence_score = confidence_score / 100.0
-    if not 0.0 <= confidence_score <= 1.0:
+    if not math.isfinite(confidence_score) or not 0.0 <= confidence_score <= 1.0:
         raise HTTPException(status_code=502, detail="AI server score must be between 0 and 1.")
 
     returned_latency = raw_response.get("latency_ms", latency_ms)
+    if isinstance(returned_latency, bool):
+        raise HTTPException(status_code=502, detail="AI server response has an invalid latency_ms.")
     try:
-        normalized_latency = max(1, int(returned_latency))
-    except (TypeError, ValueError):
-        normalized_latency = latency_ms
+        returned_latency_number = float(returned_latency)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=502,
+            detail="AI server response has an invalid latency_ms.",
+        ) from error
+    if (
+        not math.isfinite(returned_latency_number)
+        or not 0.0 <= returned_latency_number <= 600000.0
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="AI server latency_ms must be between 0 and 600000.",
+        )
+    normalized_latency = round(returned_latency_number)
 
     raw_model_version = raw_response.get("model_version")
     if not isinstance(raw_model_version, str) or not raw_model_version.strip():
         raise HTTPException(status_code=502, detail="AI server response has no valid model_version.")
+    model_version = raw_model_version.strip()
+    if len(model_version) > 100:
+        raise HTTPException(status_code=502, detail="AI server model_version is too long.")
 
     fallback_reason = "External AI server returned no analysis reason."
-    reason = str(
+    reason = (
         raw_response.get("reason")
         or raw_response.get("evidence_summary")
         or raw_response.get("explanation")
         or fallback_reason
     )
-    evidence_summary = str(
+    evidence_summary = (
         raw_response.get("evidence_summary")
         or raw_response.get("reason")
         or raw_response.get("explanation")
         or fallback_reason
     )
+    if not isinstance(reason, str) or len(reason) > 500:
+        raise HTTPException(status_code=502, detail="AI server response has an invalid reason.")
+    if not isinstance(evidence_summary, str) or len(evidence_summary) > 500:
+        raise HTTPException(
+            status_code=502,
+            detail="AI server response has an invalid evidence_summary.",
+        )
 
     return {
         "event_id": raw_event_id,
         "decision": decision,
-        "confidence_score": round(confidence_score, 2),
-        "model_version": raw_model_version,
+        "confidence_score": round(confidence_score, 4),
+        "model_version": model_version,
         "latency_ms": normalized_latency,
         "reason": reason,
         "evidence_summary": evidence_summary,
@@ -321,18 +388,22 @@ def call_external_ai_server(payload: AnalyzeRequest) -> dict:
 
     try:
         with urlopen(request, timeout=AI_SERVER_TIMEOUT_SECONDS) as response:
-            raw_body = response.read().decode("utf-8")
+            response_body = response.read(MAX_AI_RESPONSE_BYTES + 1)
+            if len(response_body) > MAX_AI_RESPONSE_BYTES:
+                raise HTTPException(status_code=502, detail="AI server response is too large.")
+            raw_body = response_body.decode("utf-8")
     except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
         raise HTTPException(
             status_code=502,
-            detail=f"AI server returned HTTP {error.code}: {error_body}",
+            detail=f"AI server returned HTTP {error.code}.",
         ) from error
-    except URLError as error:
+    except (URLError, TimeoutError) as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Could not connect to AI server: {error.reason}",
+            detail="Could not connect to AI server.",
         ) from error
+    except UnicodeDecodeError as error:
+        raise HTTPException(status_code=502, detail="AI server response is not UTF-8.") from error
 
     latency_ms = max(1, round((perf_counter() - started_at) * 1000))
     try:
@@ -477,6 +548,14 @@ def init_db() -> None:
 
 def serialize_log(row: sqlite3.Row) -> dict:
     matched_keywords = row["matched_keywords"] or ""
+    try:
+        decoded_keywords = json.loads(matched_keywords)
+        if not isinstance(decoded_keywords, list) or not all(
+            isinstance(item, str) for item in decoded_keywords
+        ):
+            raise ValueError
+    except (json.JSONDecodeError, TypeError, ValueError):
+        decoded_keywords = [item for item in matched_keywords.split(",") if item]
 
     return {
         "log_id": row["log_id"],
@@ -495,7 +574,7 @@ def serialize_log(row: sqlite3.Row) -> dict:
         "detection_type": row["detection_type"],
         "ai_score": row["ai_score"],
         "model_version": row["model_version"],
-        "matched_keywords": [item for item in matched_keywords.split(",") if item],
+        "matched_keywords": decoded_keywords,
         "policy_id": row["policy_id"],
         "action_taken": row["action_taken"],
         "decision_reason": row["decision_reason"],
@@ -536,6 +615,12 @@ async def health_check() -> dict:
     }
 
 
+@app.get("/api/v1/agent-check", dependencies=[Depends(verify_agent_token)])
+async def agent_connection_check() -> dict:
+    """Verify Agent authentication without creating a dashboard log."""
+    return {"status": "ok", "agent_token": "accepted"}
+
+
 @app.get("/dashboard")
 async def dashboard() -> FileResponse:
     if not FRONTEND_PATH.exists():
@@ -551,15 +636,16 @@ async def logs_page() -> FileResponse:
 
 
 @app.post("/api/v1/analyze", response_model=AnalyzeResponse)
-async def analyze_event(
+def analyze_event(
     payload: AnalyzeRequest,
     _: None = Depends(verify_agent_token),
 ) -> dict:
+    """Run the blocking upstream HTTP call in FastAPI's worker thread pool."""
     return call_external_ai_server(payload)
 
 
 @app.post("/api/v1/logs", status_code=201)
-async def create_log(
+def create_log(
     payload: LogCreate,
     _: None = Depends(verify_agent_token),
 ) -> JSONResponse:
@@ -609,7 +695,7 @@ async def create_log(
                     payload.leak_channel,
                     payload.detection_type,
                     payload.ai_score,
-                    ",".join(payload.matched_keywords),
+                    json.dumps(payload.matched_keywords, ensure_ascii=False),
                     payload.model_version,
                     payload.policy_id,
                     payload.action_taken,
@@ -654,7 +740,7 @@ async def create_log(
 
 
 @app.get("/api/v1/logs")
-async def list_logs(
+def list_logs(
     limit: int = Query(default=50, ge=1, le=200),
     action: str | None = Query(default=None),
     leak_channel: str | None = Query(default=None),
@@ -712,7 +798,7 @@ async def list_logs(
 
 
 @app.get("/api/v1/alerts")
-async def list_realtime_alerts(
+def list_realtime_alerts(
     after_log_id: int | None = Query(default=None, ge=0),
     cursor_epoch: str | None = Query(default=None, min_length=1, max_length=64),
     limit: int = Query(default=20, ge=1, le=100),
@@ -780,7 +866,7 @@ async def list_realtime_alerts(
 
 
 @app.get("/api/v1/logs/filter-options")
-async def log_filter_options() -> dict:
+def log_filter_options() -> dict:
     with closing(get_connection()) as connection:
         departments = connection.execute(
             """
@@ -817,7 +903,7 @@ async def log_filter_options() -> dict:
 
 
 @app.get("/api/v1/logs/{log_id}")
-async def get_log(log_id: int) -> dict:
+def get_log(log_id: int) -> dict:
     with closing(get_connection()) as connection:
         row = connection.execute("SELECT * FROM dlp_logs WHERE log_id = ?", (log_id,)).fetchone()
 
@@ -827,7 +913,7 @@ async def get_log(log_id: int) -> dict:
 
 
 @app.get("/api/v1/policies")
-async def list_policies() -> dict:
+def list_policies() -> dict:
     with closing(get_connection()) as connection:
         rows = connection.execute(
             "SELECT * FROM dlp_policies ORDER BY is_active DESC, policy_id ASC"
@@ -836,7 +922,10 @@ async def list_policies() -> dict:
 
 
 @app.post("/api/v1/policies", status_code=201)
-async def create_policy(payload: PolicyCreate) -> dict:
+def create_policy(
+    payload: PolicyCreate,
+    _: None = Depends(verify_agent_token),
+) -> dict:
     if payload.block_threshold < payload.ai_threshold:
         raise HTTPException(
             status_code=400,
@@ -867,18 +956,23 @@ async def create_policy(payload: PolicyCreate) -> dict:
 
 
 @app.get("/api/v1/dashboard/summary")
-async def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
+def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
     today = datetime.now(timezone.utc).date()
     since = datetime.combine(
         today - timedelta(days=days - 1),
         time.min,
         tzinfo=timezone.utc,
     )
+    until = datetime.combine(today + timedelta(days=1), time.min, tzinfo=timezone.utc)
 
     with closing(get_connection()) as connection:
         rows = connection.execute(
-            "SELECT * FROM dlp_logs WHERE timestamp >= ? ORDER BY timestamp DESC",
-            (since.isoformat(),),
+            """
+            SELECT * FROM dlp_logs
+            WHERE timestamp >= ? AND timestamp < ?
+            ORDER BY timestamp DESC
+            """,
+            (since.isoformat(), until.isoformat()),
         ).fetchall()
 
     logs = [serialize_log(row) for row in rows]

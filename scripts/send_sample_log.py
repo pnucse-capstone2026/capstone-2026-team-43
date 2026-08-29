@@ -13,6 +13,8 @@ from urllib.request import Request, urlopen
 DEFAULT_API_URL = "http://127.0.0.1:8000/api/v1/logs"
 DEFAULT_ANALYZE_URL = "http://127.0.0.1:8000/api/v1/analyze"
 DEFAULT_AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "sentry-agent-demo-token")
+FIXTURE_MODEL_VERSION = "demo-fixture-not-live"
+ANALYZED_FIXTURE_MARKER = "[WEB FIXTURE - NOT HOST LIVE]"
 DECISION_TO_ACTION = {
     "allow": "ALLOWED",
     "review": "WARNED",
@@ -133,6 +135,7 @@ SCENARIOS = {
         "latency_ms": 136,
     },
 }
+SCENARIO_ORDER = tuple(SCENARIOS)
 
 ANALYZE_SCENARIOS = {
     "web_upload": {
@@ -201,10 +204,12 @@ def build_sample_payload(
         "host_ip": "192.168.10.42",
         "hostname": "host-agent-demo-01",
         **scenario_payload,
-        "model_version": (
-            None
-            if scenario_payload["detection_type"] == "RULE_BASED"
-            else "koelectra-dlp-v7"
+        "model_version": FIXTURE_MODEL_VERSION,
+        "decision_reason": (
+            f"[DEMO FIXTURE - NOT LIVE] {scenario_payload['decision_reason']}"
+        ),
+        "evidence_summary": (
+            f"[DEMO FIXTURE - NOT LIVE] {scenario_payload['evidence_summary']}"
         ),
     }
 
@@ -234,10 +239,17 @@ def apply_analysis_result(log_payload: dict, analysis_result: dict) -> dict:
     log_payload["latency_ms"] = analysis_result["latency_ms"]
     log_payload["model_version"] = analysis_result["model_version"]
     log_payload["decision_reason"] = (
-        f"Mock AI decision={decision}, model={analysis_result['model_version']}."
+        f"{ANALYZED_FIXTURE_MARKER} {analysis_result['reason']}"
     )
-    log_payload["evidence_summary"] = analysis_result["evidence_summary"]
+    log_payload["evidence_summary"] = (
+        f"{ANALYZED_FIXTURE_MARKER} "
+        f"{analysis_result.get('evidence_summary') or analysis_result['reason']}"
+    )
     return log_payload
+
+
+def expand_scenarios(scenario: str, count: int) -> list[str]:
+    return list(SCENARIO_ORDER) * count if scenario == "all" else [scenario] * count
 
 
 def post_json(api_url: str, payload: dict, token: str | None = None) -> dict:
@@ -260,7 +272,7 @@ def post_json(api_url: str, payload: dict, token: str | None = None) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Send one sample Host Agent DLP event to the dashboard API."
+        description="Send sample Host Agent DLP events to the dashboard API."
     )
     parser.add_argument(
         "--url",
@@ -270,19 +282,28 @@ def main() -> int:
     parser.add_argument(
         "--analyze-url",
         default=DEFAULT_ANALYZE_URL,
-        help=f"Target mock analyze API URL. Default: {DEFAULT_ANALYZE_URL}",
+        help=f"Target analyze API URL. Default: {DEFAULT_ANALYZE_URL}",
     )
     parser.add_argument(
         "--scenario",
-        choices=sorted(SCENARIOS),
+        choices=["all", *SCENARIO_ORDER],
         default="web_upload",
-        help="Sample Host Agent event scenario to send.",
+        help=(
+            "Web display fixture to send. Use 'all' for all seven fixtures; "
+            "this does not mean Host Agent has seven independent detectors."
+        ),
     )
     parser.add_argument(
         "--count",
         type=int,
         default=1,
-        help="Number of sample events to send. Default: 1",
+        help="Number of events, or rounds when --scenario all is used. Default: 1",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=0.1,
+        help="Seconds to wait between events. Default: 0.1",
     )
     parser.add_argument(
         "--agent-id",
@@ -302,7 +323,7 @@ def main() -> int:
     parser.add_argument(
         "--analyze-first",
         action="store_true",
-        help="Call /api/v1/analyze first and use the mock AI decision in the log payload.",
+        help="Call /api/v1/analyze first and use its returned decision in the log payload.",
     )
     parser.add_argument(
         "--dry-run",
@@ -313,32 +334,44 @@ def main() -> int:
 
     if args.count < 1:
         parser.error("--count must be greater than or equal to 1.")
+    if args.interval < 0:
+        parser.error("--interval must be greater than or equal to 0.")
 
     if args.analyze_url == DEFAULT_ANALYZE_URL and args.url != DEFAULT_API_URL:
         args.analyze_url = args.url.removesuffix("/logs") + "/analyze"
 
-    payloads = [
-        build_sample_payload(
-            args.scenario,
-            sequence=index + 1,
-            agent_id=args.agent_id,
-            event_id=args.event_id,
+    scenario_names = expand_scenarios(args.scenario, args.count)
+    scenario_payloads = [
+        (
+            scenario,
+            build_sample_payload(
+                scenario,
+                sequence=index,
+                agent_id=args.agent_id,
+                event_id=args.event_id,
+            ),
         )
-        for index in range(args.count)
+        for index, scenario in enumerate(scenario_names, start=1)
     ]
+    payloads = [payload for _, payload in scenario_payloads]
 
     if args.analyze_first:
-        print("Base log payload before mock analysis:")
-    print(json.dumps(payloads[0] if args.count == 1 else payloads, ensure_ascii=False, indent=2))
+        print(
+            "Web fixture payload before analysis. Any returned model result still "
+            "does not prove a live Host hook event."
+        )
+    else:
+        print("Demo fixture only: scores and actions below are predefined, not live analysis results.")
+    print(json.dumps(payloads[0] if len(payloads) == 1 else payloads, ensure_ascii=False, indent=2))
 
     if args.dry_run:
         print("Dry run complete. No request was sent.")
         return 0
 
     results = []
-    for index, payload in enumerate(payloads, start=1):
+    for index, (scenario, payload) in enumerate(scenario_payloads, start=1):
         if args.analyze_first:
-            analyze_payload = build_analyze_payload(args.scenario, payload)
+            analyze_payload = build_analyze_payload(scenario, payload)
             try:
                 analysis_result = post_json(args.analyze_url, analyze_payload, token=args.token)
             except HTTPError as error:
@@ -367,8 +400,8 @@ def main() -> int:
             return 1
 
         results.append(result)
-        if index < len(payloads):
-            sleep(0.1)
+        if index < len(scenario_payloads):
+            sleep(args.interval)
 
     print(f"{len(results)} sample log(s) sent successfully.")
     print(json.dumps(results[0] if len(results) == 1 else results, ensure_ascii=False, indent=2))

@@ -1117,7 +1117,7 @@
                         <h2>민감정보 파일 반출 탐지를 위한<br>AI 기반 Host DLP 시스템</h2>
                         <p class="hero-copy">
                             Host Agent가 수집한 이벤트와 AI 민감도 분석 결과를 통합해서 보여주는 관리자 대시보드입니다.<br>
-                            차단 현황, 채널 분포, 부서별 위험도와 상세 탐지 근거를 빠르게 확인할 수 있습니다.
+                            차단 현황, 채널 분포, 부서별 탐지 건수와 상세 탐지 근거를 빠르게 확인할 수 있습니다.
                         </p>
                         <div class="hero-actions">
                             <a class="button primary" href="/logs">로그 상세 분석 보기</a>
@@ -1159,7 +1159,7 @@
                         <div class="kpi-foot">0.00 ~ 1.00 스케일</div>
                     </div>
                     <div class="panel metric-card span-3">
-                        <div class="kpi-title">최다 위험 부서</div>
+                        <div class="kpi-title">최다 탐지 부서</div>
                         <div class="kpi-value" id="topDepartment">-</div>
                         <div class="kpi-foot">탐지 건수 기준 상위 부서</div>
                     </div>
@@ -1210,7 +1210,7 @@
                         <div class="section-head">
                             <div class="section-title">
                                 <span class="section-kicker">Department</span>
-                                <h3>부서별 위험도</h3>
+                                <h3>부서별 탐지 건수</h3>
                             </div>
                             <span class="pill">상위 5개</span>
                         </div>
@@ -1686,7 +1686,7 @@
                         <strong>${index + 1}. ${escapeHtml(item.department)}</strong>
                         <div class="detail-muted">${item.count}건 탐지</div>
                     </div>
-                    <div class="ranking-score">${Math.max(10, item.count * 10)}점</div>
+                    <div class="ranking-score">${item.count}건</div>
                 </div>
             `).join("");
         }
@@ -2049,7 +2049,7 @@
             if (startDate) params.set("start_date", startDate);
             if (endDate) params.set("end_date", endDate);
             if (keyword) params.set("q", keyword);
-            params.set("limit", "50");
+            params.set("limit", "200");
 
             return `/api/v1/logs?${params.toString()}`;
         }

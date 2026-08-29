@@ -7,7 +7,7 @@ Host Agent가 전송한 민감정보 반출 탐지 로그를 저장하고, 관�
 - Host Agent 로그 수집과 `event_id` 기반 중복 저장 방지
 - Agent 전용 토큰 인증
 - 탐지 로그 검색, 필터, 목록 및 상세 조회
-- 최근 7일 KPI, 탐지 추이, 채널 분포, 부서별 위험도 시각화
+- 최근 7일 KPI, 탐지 추이, 채널 분포, 부서별 탐지 건수 시각화
 - 고위험 이벤트와 Evidence 상세 분석
 - `log_id` 커서 기반 2초 주기 준실시간 위험 알림과 선택형 경고음
 - Mock AI 분석 및 외부 AI 서버 전달 구조
@@ -180,7 +180,7 @@ logging:
 ### 6.2 Agent 로그 연동 규칙
 
 - 요청 헤더: `X-Agent-Token: <AGENT_API_TOKEN>`
-- `timestamp`: UTC offset을 포함한 ISO 8601 형식 권장
+- `timestamp`: UTC offset을 포함한 ISO 8601 형식 필수
 - `event_id`: Agent 재전송 중복 방지를 위해 신규 연동에서는 항상 포함 권장
 - `ai_score`: `0.0` 이상 `1.0` 이하
 - `action_taken`: `BLOCKED`, `WARNED`, `ALLOWED`
@@ -508,6 +508,7 @@ python scripts/seed_demo_data.py --db /tmp/dlp-demo.db
 ```
 
 기준 날짜의 기본값은 현재 UTC 날짜입니다. 전체 옵션은 `python scripts/seed_demo_data.py --help`로 확인할 수 있습니다.
+같은 날짜의 이전 demo fixture가 이미 있으면 운영 로그는 건드리지 않고 해당 `demo-seed-*` 행의 모델 표기와 fixture 안내 문구만 최신 값으로 갱신합니다.
 
 ## 8. 외부 AI 서버 연결
 
@@ -515,9 +516,11 @@ python scripts/seed_demo_data.py --db /tmp/dlp-demo.db
 
 ```dotenv
 AI_SERVER_URL=http://127.0.0.1:9000
-AI_SERVER_TOKEN=replace-if-required
+AI_SERVER_TOKEN=
 AI_SERVER_TIMEOUT_SECONDS=5
 ```
+
+`AI_SERVER_TOKEN`은 AI 서버와 동일한 32자 이상의 실제 ASCII 무작위 토큰을 입력해야 합니다.
 
 `AI_SERVER_URL` 경로 처리 규칙은 다음과 같습니다.
 

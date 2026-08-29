@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -31,6 +31,11 @@ AI_SERVER_TOKEN = os.getenv("AI_SERVER_TOKEN", "").strip()
 AI_SERVER_TIMEOUT_SECONDS = float(os.getenv("AI_SERVER_TIMEOUT_SECONDS", "5"))
 HIGH_RISK_SCORE_THRESHOLD = 0.85
 DATABASE_EPOCH_KEY = "database_epoch"
+MAX_AI_RESPONSE_BYTES = 64 * 1024
+UNSAFE_TOKEN_VALUES = {
+    "replace-with-a-long-random-token",
+    "replace-with-ai-server-random-token",
+}
 
 
 def require_ascii_token(name: str, value: str) -> None:
@@ -38,7 +43,7 @@ def require_ascii_token(name: str, value: str) -> None:
         token_bytes = value.encode("ascii")
     except UnicodeEncodeError as error:
         raise RuntimeError(f"{name} must be an ASCII random token.") from error
-    if len(token_bytes) < 32:
+    if len(token_bytes) < 32 or value in UNSAFE_TOKEN_VALUES:
         raise RuntimeError(f"{name} must contain at least 32 ASCII characters.")
 
 
@@ -46,6 +51,8 @@ if AGENT_API_TOKEN != DEFAULT_AGENT_API_TOKEN:
     require_ascii_token("AGENT_API_TOKEN", AGENT_API_TOKEN)
 if AI_SERVER_URL:
     require_ascii_token("AI_SERVER_TOKEN", AI_SERVER_TOKEN)
+if not math.isfinite(AI_SERVER_TIMEOUT_SECONDS) or AI_SERVER_TIMEOUT_SECONDS <= 0:
+    raise RuntimeError("AI_SERVER_TIMEOUT_SECONDS must be a positive finite number.")
 
 LEAK_CHANNELS = [
     "USB_COPY",
@@ -107,6 +114,13 @@ class LogCreate(BaseModel):
     evidence_summary: str = Field(default="", max_length=500)
     latency_ms: int | None = Field(default=None, ge=0, le=600000)
 
+    @field_validator("timestamp")
+    @classmethod
+    def timestamp_must_include_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must include a UTC offset")
+        return value
+
 
 class AnalyzeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
@@ -159,7 +173,14 @@ class PolicyCreate(BaseModel):
 def verify_agent_token(
     x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
 ) -> None:
-    if not x_agent_token or not compare_digest(x_agent_token, AGENT_API_TOKEN):
+    try:
+        provided_token = (x_agent_token or "").encode("ascii")
+    except UnicodeEncodeError:
+        provided_token = b""
+    if not provided_token or not compare_digest(
+        provided_token,
+        AGENT_API_TOKEN.encode("ascii"),
+    ):
         raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
 
 
@@ -367,18 +388,22 @@ def call_external_ai_server(payload: AnalyzeRequest) -> dict:
 
     try:
         with urlopen(request, timeout=AI_SERVER_TIMEOUT_SECONDS) as response:
-            raw_body = response.read().decode("utf-8")
+            response_body = response.read(MAX_AI_RESPONSE_BYTES + 1)
+            if len(response_body) > MAX_AI_RESPONSE_BYTES:
+                raise HTTPException(status_code=502, detail="AI server response is too large.")
+            raw_body = response_body.decode("utf-8")
     except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
         raise HTTPException(
             status_code=502,
-            detail=f"AI server returned HTTP {error.code}: {error_body}",
+            detail=f"AI server returned HTTP {error.code}.",
         ) from error
-    except URLError as error:
+    except (URLError, TimeoutError) as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Could not connect to AI server: {error.reason}",
+            detail="Could not connect to AI server.",
         ) from error
+    except UnicodeDecodeError as error:
+        raise HTTPException(status_code=502, detail="AI server response is not UTF-8.") from error
 
     latency_ms = max(1, round((perf_counter() - started_at) * 1000))
     try:
@@ -523,6 +548,14 @@ def init_db() -> None:
 
 def serialize_log(row: sqlite3.Row) -> dict:
     matched_keywords = row["matched_keywords"] or ""
+    try:
+        decoded_keywords = json.loads(matched_keywords)
+        if not isinstance(decoded_keywords, list) or not all(
+            isinstance(item, str) for item in decoded_keywords
+        ):
+            raise ValueError
+    except (json.JSONDecodeError, TypeError, ValueError):
+        decoded_keywords = [item for item in matched_keywords.split(",") if item]
 
     return {
         "log_id": row["log_id"],
@@ -541,7 +574,7 @@ def serialize_log(row: sqlite3.Row) -> dict:
         "detection_type": row["detection_type"],
         "ai_score": row["ai_score"],
         "model_version": row["model_version"],
-        "matched_keywords": [item for item in matched_keywords.split(",") if item],
+        "matched_keywords": decoded_keywords,
         "policy_id": row["policy_id"],
         "action_taken": row["action_taken"],
         "decision_reason": row["decision_reason"],
@@ -612,7 +645,7 @@ def analyze_event(
 
 
 @app.post("/api/v1/logs", status_code=201)
-async def create_log(
+def create_log(
     payload: LogCreate,
     _: None = Depends(verify_agent_token),
 ) -> JSONResponse:
@@ -662,7 +695,7 @@ async def create_log(
                     payload.leak_channel,
                     payload.detection_type,
                     payload.ai_score,
-                    ",".join(payload.matched_keywords),
+                    json.dumps(payload.matched_keywords, ensure_ascii=False),
                     payload.model_version,
                     payload.policy_id,
                     payload.action_taken,
@@ -707,7 +740,7 @@ async def create_log(
 
 
 @app.get("/api/v1/logs")
-async def list_logs(
+def list_logs(
     limit: int = Query(default=50, ge=1, le=200),
     action: str | None = Query(default=None),
     leak_channel: str | None = Query(default=None),
@@ -765,7 +798,7 @@ async def list_logs(
 
 
 @app.get("/api/v1/alerts")
-async def list_realtime_alerts(
+def list_realtime_alerts(
     after_log_id: int | None = Query(default=None, ge=0),
     cursor_epoch: str | None = Query(default=None, min_length=1, max_length=64),
     limit: int = Query(default=20, ge=1, le=100),
@@ -833,7 +866,7 @@ async def list_realtime_alerts(
 
 
 @app.get("/api/v1/logs/filter-options")
-async def log_filter_options() -> dict:
+def log_filter_options() -> dict:
     with closing(get_connection()) as connection:
         departments = connection.execute(
             """
@@ -870,7 +903,7 @@ async def log_filter_options() -> dict:
 
 
 @app.get("/api/v1/logs/{log_id}")
-async def get_log(log_id: int) -> dict:
+def get_log(log_id: int) -> dict:
     with closing(get_connection()) as connection:
         row = connection.execute("SELECT * FROM dlp_logs WHERE log_id = ?", (log_id,)).fetchone()
 
@@ -880,7 +913,7 @@ async def get_log(log_id: int) -> dict:
 
 
 @app.get("/api/v1/policies")
-async def list_policies() -> dict:
+def list_policies() -> dict:
     with closing(get_connection()) as connection:
         rows = connection.execute(
             "SELECT * FROM dlp_policies ORDER BY is_active DESC, policy_id ASC"
@@ -889,7 +922,7 @@ async def list_policies() -> dict:
 
 
 @app.post("/api/v1/policies", status_code=201)
-async def create_policy(
+def create_policy(
     payload: PolicyCreate,
     _: None = Depends(verify_agent_token),
 ) -> dict:
@@ -923,18 +956,23 @@ async def create_policy(
 
 
 @app.get("/api/v1/dashboard/summary")
-async def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
+def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
     today = datetime.now(timezone.utc).date()
     since = datetime.combine(
         today - timedelta(days=days - 1),
         time.min,
         tzinfo=timezone.utc,
     )
+    until = datetime.combine(today + timedelta(days=1), time.min, tzinfo=timezone.utc)
 
     with closing(get_connection()) as connection:
         rows = connection.execute(
-            "SELECT * FROM dlp_logs WHERE timestamp >= ? ORDER BY timestamp DESC",
-            (since.isoformat(),),
+            """
+            SELECT * FROM dlp_logs
+            WHERE timestamp >= ? AND timestamp < ?
+            ORDER BY timestamp DESC
+            """,
+            (since.isoformat(), until.isoformat()),
         ).fetchall()
 
     logs = [serialize_log(row) for row in rows]

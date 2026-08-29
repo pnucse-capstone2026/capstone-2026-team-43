@@ -1016,8 +1016,13 @@ class FakeExternalResponse:
     def __exit__(self, *args: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self.body
+    def read(self, size: int = -1) -> bytes:
+        return self.body if size < 0 else self.body[:size]
+
+
+class FakeRawExternalResponse(FakeExternalResponse):
+    def __init__(self, body: bytes) -> None:
+        self.body = body
 
 
 def test_slow_external_ai_does_not_block_health_requests(
@@ -1287,6 +1292,142 @@ def test_external_ai_connection_failure_returns_502(
 
     assert response.status_code == 502
     assert "Could not connect to AI server" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("body", "detail"),
+    [
+        (b"x" * (main.MAX_AI_RESPONSE_BYTES + 1), "too large"),
+        (b"\xff\xfe", "not UTF-8"),
+    ],
+)
+def test_external_ai_rejects_unbounded_or_invalid_response_bodies(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    body: bytes,
+    detail: str,
+) -> None:
+    monkeypatch.setattr(main, "AI_SERVER_URL", "http://team-ai.local")
+    monkeypatch.setattr(
+        main,
+        "urlopen",
+        lambda request, timeout: FakeRawExternalResponse(body),
+    )
+
+    response = client.post(
+        "/api/v1/analyze",
+        json=make_analyze_payload(),
+        headers=agent_headers,
+    )
+
+    assert response.status_code == 502
+    assert detail in response.json()["detail"]
+
+
+def test_non_ascii_agent_token_is_rejected_as_unauthorized() -> None:
+    with pytest.raises(main.HTTPException) as error:
+        main.verify_agent_token("가" * 32)
+
+    assert error.value.status_code == 401
+
+
+@pytest.mark.parametrize("token", sorted(main.UNSAFE_TOKEN_VALUES))
+def test_public_example_tokens_are_rejected(token: str) -> None:
+    with pytest.raises(RuntimeError):
+        main.require_ascii_token("TEST_TOKEN", token)
+
+
+def test_database_routes_run_off_the_event_loop(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_started = Event()
+    release_connection = Event()
+    original_get_connection = main.get_connection
+
+    def slow_get_connection() -> sqlite3.Connection:
+        connection_started.set()
+        assert release_connection.wait(timeout=2)
+        return original_get_connection()
+
+    monkeypatch.setattr(main, "get_connection", slow_get_connection)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        logs_future = executor.submit(client.get, "/api/v1/logs")
+        assert connection_started.wait(timeout=1)
+        health_future = executor.submit(client.get, "/health")
+        try:
+            assert health_future.result(timeout=1).status_code == 200
+        finally:
+            release_connection.set()
+        assert logs_future.result(timeout=2).status_code == 200
+
+
+def test_log_timestamp_requires_an_explicit_utc_offset(
+    client: TestClient,
+    agent_headers: dict[str, str],
+) -> None:
+    payload = make_log_payload("naive-timestamp")
+    payload["timestamp"] = "2026-08-29T00:30:00"
+
+    response = client.post("/api/v1/logs", json=payload, headers=agent_headers)
+
+    assert response.status_code == 422
+
+
+def test_matched_keywords_round_trip_commas_without_corruption(
+    client: TestClient,
+    agent_headers: dict[str, str],
+) -> None:
+    payload = make_log_payload("keyword-comma")
+    payload["matched_keywords"] = ["last,name", "contract"]
+    created = client.post("/api/v1/logs", json=payload, headers=agent_headers)
+
+    detail = client.get(f"/api/v1/logs/{created.json()['log_id']}")
+
+    assert created.status_code == 201
+    assert detail.json()["matched_keywords"] == ["last,name", "contract"]
+
+
+def test_legacy_comma_separated_keywords_remain_readable(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    temp_db_path: Path,
+) -> None:
+    created = client.post(
+        "/api/v1/logs",
+        json=make_log_payload("legacy-keywords"),
+        headers=agent_headers,
+    )
+    assert created.status_code == 201
+    log_id = created.json()["log_id"]
+    with sqlite3.connect(temp_db_path) as connection:
+        connection.execute(
+            "UPDATE dlp_logs SET matched_keywords = ? WHERE log_id = ?",
+            ("rrn,email", log_id),
+        )
+
+    detail = client.get(f"/api/v1/logs/{log_id}")
+
+    assert detail.status_code == 200
+    assert detail.json()["matched_keywords"] == ["rrn", "email"]
+
+
+def test_dashboard_summary_excludes_future_events(
+    client: TestClient,
+    agent_headers: dict[str, str],
+) -> None:
+    future = datetime.now(timezone.utc) + timedelta(days=365)
+    post_log(
+        client,
+        agent_headers,
+        make_log_payload("future-event", timestamp=future),
+    )
+
+    summary = client.get("/api/v1/dashboard/summary", params={"days": 7}).json()
+
+    assert summary["kpis"]["total_events"] == 0
+    assert sum(item["count"] for item in summary["timeline"]) == 0
 
 
 def test_unknown_log_returns_404(client: TestClient) -> None:

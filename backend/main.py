@@ -29,13 +29,31 @@ MOCK_MODEL_VERSION = "koelectra-v0.1-mock"
 AI_SERVER_URL = os.getenv("AI_SERVER_URL", "").strip()
 AI_SERVER_TOKEN = os.getenv("AI_SERVER_TOKEN", "").strip()
 AI_SERVER_TIMEOUT_SECONDS = float(os.getenv("AI_SERVER_TIMEOUT_SECONDS", "5"))
-HIGH_RISK_SCORE_THRESHOLD = 0.85
 DATABASE_EPOCH_KEY = "database_epoch"
 MAX_AI_RESPONSE_BYTES = 64 * 1024
 UNSAFE_TOKEN_VALUES = {
     "replace-with-a-long-random-token",
     "replace-with-ai-server-random-token",
 }
+
+
+def parse_high_risk_score_threshold(raw_value: str) -> float:
+    try:
+        threshold = float(raw_value)
+    except ValueError as error:
+        raise RuntimeError(
+            "HIGH_RISK_SCORE_THRESHOLD must be a finite number between 0 and 1."
+        ) from error
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise RuntimeError(
+            "HIGH_RISK_SCORE_THRESHOLD must be a finite number between 0 and 1."
+        )
+    return threshold
+
+
+HIGH_RISK_SCORE_THRESHOLD = parse_high_risk_score_threshold(
+    os.getenv("HIGH_RISK_SCORE_THRESHOLD", "0.85")
+)
 
 
 def require_ascii_token(name: str, value: str) -> None:
@@ -612,6 +630,7 @@ async def health_check() -> dict:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "analysis_mode": "external" if get_external_analyze_url() else "mock",
         "ai_server_url_configured": bool(get_external_analyze_url()),
+        "high_risk_score_threshold": HIGH_RISK_SCORE_THRESHOLD,
     }
 
 

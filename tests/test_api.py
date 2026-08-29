@@ -162,6 +162,7 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
     assert health.json()["status"] == "ok"
     assert health.json()["analysis_mode"] == "mock"
     assert health.json()["ai_server_url_configured"] is False
+    assert health.json()["high_risk_score_threshold"] == main.HIGH_RISK_SCORE_THRESHOLD
 
     for path in ("/dashboard", "/logs"):
         response = client.get(path)
@@ -220,6 +221,8 @@ def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
     ):
         assert marker in html
 
+    assert "AI 0.85 이상" not in html
+    assert "설정 임계값 이상" in html
     assert "setInterval(loadDashboard" not in html
     assert html.index("if (cursorAdvanced) {") < html.index("if (items.length) {")
     assert html.index("alertSoundEnabled = shouldEnable") > html.index("await alertAudioContext.resume()")
@@ -385,6 +388,16 @@ def test_configured_tokens_must_be_long_ascii_values(token: str) -> None:
         main.require_ascii_token("TEST_TOKEN", token)
 
     assert main.require_ascii_token("TEST_TOKEN", "a" * 32) is None
+
+
+@pytest.mark.parametrize("raw_value", ["", "nan", "inf", "-0.01", "1.01", "invalid"])
+def test_high_risk_score_threshold_rejects_invalid_settings(raw_value: str) -> None:
+    with pytest.raises(RuntimeError, match="finite number between 0 and 1"):
+        main.parse_high_risk_score_threshold(raw_value)
+
+    assert main.parse_high_risk_score_threshold("0") == 0.0
+    assert main.parse_high_risk_score_threshold("0.85") == 0.85
+    assert main.parse_high_risk_score_threshold("1") == 1.0
 
 
 def test_external_analysis_endpoint_uses_fastapi_worker_thread() -> None:
@@ -623,6 +636,46 @@ def test_realtime_alerts_use_a_cursor_without_replaying_history(
     assert empty.json()["items"] == []
     assert empty.json()["next_cursor"] == latest_low_risk["log_id"]
     assert empty.json()["cursor_reset"] is False
+
+
+def test_configured_high_risk_threshold_is_shared_by_alerts_and_summary(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "HIGH_RISK_SCORE_THRESHOLD", 0.75)
+    baseline = client.get("/api/v1/alerts").json()
+
+    below = post_log(
+        client,
+        agent_headers,
+        make_log_payload("threshold-below", ai_score=0.7499, action_taken="WARNED"),
+    )
+    boundary = post_log(
+        client,
+        agent_headers,
+        make_log_payload("threshold-boundary", ai_score=0.75, action_taken="WARNED"),
+    )
+    blocked = post_log(
+        client,
+        agent_headers,
+        make_log_payload("threshold-blocked", ai_score=0.1, action_taken="BLOCKED"),
+    )
+
+    alerts = client.get(
+        "/api/v1/alerts",
+        params={
+            "after_log_id": baseline["next_cursor"],
+            "cursor_epoch": baseline["cursor_epoch"],
+        },
+    ).json()
+    summary = client.get("/api/v1/dashboard/summary", params={"days": 7}).json()
+    expected_ids = {boundary["event_id"], blocked["event_id"]}
+
+    assert below["event_id"] not in expected_ids
+    assert {item["event_id"] for item in alerts["items"]} == expected_ids
+    assert {item["event_id"] for item in summary["high_risk_events"]} == expected_ids
+    assert client.get("/health").json()["high_risk_score_threshold"] == 0.75
 
 
 def test_realtime_alert_cursor_recovers_after_database_reset(

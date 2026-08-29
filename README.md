@@ -79,6 +79,7 @@ python -m pip install -r requirements-dev.txt
 | `AI_SERVER_URL` | 선택 | 내부 Mock 분석 | 실제 AI 서버 주소 |
 | `AI_SERVER_TOKEN` | 외부 AI 사용 시 필수 | 미사용 | 외부 AI 서버의 `AI_API_TOKEN`과 같은 32자 이상 ASCII Bearer 토큰 |
 | `AI_SERVER_TIMEOUT_SECONDS` | 선택 | `5` | 외부 AI 서버 응답 대기 시간(초) |
+| `HIGH_RISK_SCORE_THRESHOLD` | 선택 | `0.85` | Web 대시보드에서 고위험으로 표시할 AI 점수 임계값. `0.0`~`1.0` |
 
 팀 공유 또는 시연 환경에서는 예시 파일을 복사한 뒤 토큰을 반드시 교체합니다.
 
@@ -134,7 +135,7 @@ logging:
   send_immediately: true
 ```
 
-대시보드를 먼저 연 뒤 Host Agent에서 반출 시나리오를 실행하면, 새 `BLOCKED` 이벤트 또는 AI 점수 `0.85` 이상 이벤트가 약 2초 안에 다른 컴퓨터의 대시보드에 표시됩니다. 두 컴퓨터 사이에서 TCP 8000 포트 접근이 가능해야 합니다. 본 앱은 브라우저 API를 same-origin으로만 사용하며 cross-origin 요청을 허용하지 않습니다. 조회 API에는 관리자 로그인이 없으므로 통제된 시연 LAN 밖에 공개하지 않고, 외부 서버는 HTTPS·인증 reverse proxy를 먼저 적용합니다.
+대시보드를 먼저 연 뒤 Host Agent에서 반출 시나리오를 실행하면, 새 `BLOCKED` 이벤트 또는 설정한 고위험 AI 점수 임계값 이상 이벤트가 약 2초 안에 다른 컴퓨터의 대시보드에 표시됩니다. 두 컴퓨터 사이에서 TCP 8000 포트 접근이 가능해야 합니다. 본 앱은 브라우저 API를 same-origin으로만 사용하며 cross-origin 요청을 허용하지 않습니다. 조회 API에는 관리자 로그인이 없으므로 통제된 시연 LAN 밖에 공개하지 않고, 외부 서버는 HTTPS·인증 reverse proxy를 먼저 적용합니다.
 
 ## 6. 주요 API
 
@@ -159,7 +160,7 @@ logging:
 대시보드를 열면 현재 최신 `log_id`를 기준선으로 저장한 뒤 2초마다 신규 고위험 로그를 조회합니다. 기존 이력은 토스트로 재생하지 않고, 화면을 연 뒤 저장된 다음 조건의 이벤트만 알립니다.
 
 - `action_taken == BLOCKED`
-- `ai_score >= 0.85`
+- `ai_score >= HIGH_RISK_SCORE_THRESHOLD` (기본값 `0.85`)
 
 신규 이벤트가 있으면 우측 상단에 빨간 위험 알림이 표시되고, `상세 로그 보기`로 해당 `log_id`의 분석 화면을 열 수 있습니다. 경고음은 브라우저 자동 재생 정책 때문에 기본으로 꺼져 있으며, 상단의 `경고음 꺼` 버튼을 사용자가 한 번 눌러야 켜집니다.
 
@@ -176,6 +177,8 @@ logging:
 - 탭이 다시 표시되면 저장한 커서 이후 이벤트를 즉시 조회
 
 이 기능은 WebSocket이나 SSE가 아닌 HTTP 폴링 방식입니다. 화면에는 `실시간 알림`으로 표시하지만 정확한 기술 범위는 약 2초 지연의 시연용 준실시간 알림입니다.
+
+`HIGH_RISK_SCORE_THRESHOLD`는 Web의 고위험 표시 기준만 바꾸며 Host Agent가 기록한 `action_taken`을 다시 계산하지 않습니다. 값을 바꾼 뒤에는 Web 서버를 재시작하고 `/health`의 `high_risk_score_threshold`로 적용값을 확인합니다.
 
 ### 6.2 Agent 로그 연동 규칙
 
@@ -450,7 +453,7 @@ python scripts/send_sample_log.py --scenario all --interval 2.5
 
 `--analyze-first`가 없는 샘플의 AI 점수와 조치는 실제 탐지나 모델 결과가 아닌 미리 정한 fixture입니다. 이 경우 `model_version`은 `demo-fixture-not-live`, 판단 근거는 `DEMO FIXTURE - NOT LIVE`로 표시됩니다. Web 분석 중계에 연결된 AI 결과를 사용하려면 `--analyze-first`를 추가하고, 대시보드 상단의 `Web 분석` 모드가 `EXTERNAL`인지 확인합니다. 이때 실제 모델 응답을 사용하더라도 입력과 채널 발생 자체는 Web fixture이므로 판단 근거에는 `WEB FIXTURE - NOT HOST LIVE`가 유지됩니다. `MOCK`이면 Web 내부 목 분석입니다. 이 표시는 Web의 `/api/v1/analyze`에만 해당하며, Host Agent가 AI 서버에 직접 연결한 이벤트의 실제 모델 여부는 로그 상세의 `model_version`, `detection_type`, 판단 근거를 함께 확인합니다.
 
-모든 신규 이벤트는 KPI, 채널 차트와 최근 로그에 자동 반영됩니다. 경고 토스트와 경고음은 조치가 `BLOCKED`이거나 AI 점수가 `0.85` 이상인 고위험 이벤트에만 발생합니다.
+모든 신규 이벤트는 KPI, 채널 차트와 최근 로그에 자동 반영됩니다. 경고 토스트와 경고음은 조치가 `BLOCKED`이거나 AI 점수가 설정한 `HIGH_RISK_SCORE_THRESHOLD` 이상인 고위험 이벤트에만 발생합니다.
 
 중복 방지 확인:
 
@@ -576,6 +579,7 @@ python -m pytest -q
 - 로그 입력값 검증과 조합 필터
 - 최근 기간 KPI, 차트 데이터와 날짜 경계
 - 고위험 알림 초기 기준선, 저위험 제외, 커서 페이징과 DB 세대 ID 기반 재생성 복구
+- 고위험 점수 임계값의 설정 경계와 알림·대시보드 요약 간 일치
 - 알림 UI·2초 폴링·전체 대시보드 반복 로드 금지 정적 계약
 - 정책 생성과 임계치 검증
 - 외부 AI 호출, 응답 정규화와 연결 실패 처리

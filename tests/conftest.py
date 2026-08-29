@@ -24,6 +24,7 @@ def client(temp_db_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Test
     monkeypatch.setattr(main, "AI_SERVER_URL", "")
     monkeypatch.setattr(main, "AI_SERVER_TOKEN", "")
     monkeypatch.setattr(main, "AI_SERVER_TIMEOUT_SECONDS", 1.0)
+    monkeypatch.setattr(main, "DASHBOARD_AUTH_ENABLED", False)
 
     with TestClient(main.app) as test_client:
         yield test_client

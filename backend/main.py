@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -35,6 +36,11 @@ UNSAFE_TOKEN_VALUES = {
     "replace-with-a-long-random-token",
     "replace-with-ai-server-random-token",
 }
+MIN_DASHBOARD_PASSWORD_LENGTH = 16
+DASHBOARD_VIEWER_USERNAME = os.getenv("DASHBOARD_VIEWER_USERNAME", "").strip()
+DASHBOARD_VIEWER_PASSWORD = os.getenv("DASHBOARD_VIEWER_PASSWORD", "")
+DASHBOARD_ADMIN_USERNAME = os.getenv("DASHBOARD_ADMIN_USERNAME", "").strip()
+DASHBOARD_ADMIN_PASSWORD = os.getenv("DASHBOARD_ADMIN_PASSWORD", "")
 
 
 def parse_high_risk_score_threshold(raw_value: str) -> float:
@@ -65,12 +71,61 @@ def require_ascii_token(name: str, value: str) -> None:
         raise RuntimeError(f"{name} must contain at least 32 ASCII characters.")
 
 
+def validate_dashboard_auth_configuration(
+    viewer_username: str,
+    viewer_password: str,
+    admin_username: str,
+    admin_password: str,
+) -> bool:
+    values = (viewer_username, viewer_password, admin_username, admin_password)
+    if not any(values):
+        return False
+    if not all(values):
+        raise RuntimeError(
+            "Configure all dashboard viewer/admin usernames and passwords, or leave all four empty."
+        )
+    if viewer_username == admin_username:
+        raise RuntimeError("Dashboard viewer and admin usernames must be different.")
+
+    for name, username in (
+        ("DASHBOARD_VIEWER_USERNAME", viewer_username),
+        ("DASHBOARD_ADMIN_USERNAME", admin_username),
+    ):
+        try:
+            username.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise RuntimeError(f"{name} must be ASCII for HTTP Basic authentication.") from error
+        if ":" in username:
+            raise RuntimeError(f"{name} must not contain a colon.")
+
+    for name, password in (
+        ("DASHBOARD_VIEWER_PASSWORD", viewer_password),
+        ("DASHBOARD_ADMIN_PASSWORD", admin_password),
+    ):
+        try:
+            password_bytes = password.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise RuntimeError(f"{name} must be an ASCII password.") from error
+        if len(password_bytes) < MIN_DASHBOARD_PASSWORD_LENGTH:
+            raise RuntimeError(
+                f"{name} must contain at least {MIN_DASHBOARD_PASSWORD_LENGTH} ASCII characters."
+            )
+
+    return True
+
+
 if AGENT_API_TOKEN != DEFAULT_AGENT_API_TOKEN:
     require_ascii_token("AGENT_API_TOKEN", AGENT_API_TOKEN)
 if AI_SERVER_URL:
     require_ascii_token("AI_SERVER_TOKEN", AI_SERVER_TOKEN)
 if not math.isfinite(AI_SERVER_TIMEOUT_SECONDS) or AI_SERVER_TIMEOUT_SECONDS <= 0:
     raise RuntimeError("AI_SERVER_TIMEOUT_SECONDS must be a positive finite number.")
+DASHBOARD_AUTH_ENABLED = validate_dashboard_auth_configuration(
+    DASHBOARD_VIEWER_USERNAME,
+    DASHBOARD_VIEWER_PASSWORD,
+    DASHBOARD_ADMIN_USERNAME,
+    DASHBOARD_ADMIN_PASSWORD,
+)
 
 LEAK_CHANNELS = [
     "USB_COPY",
@@ -99,6 +154,7 @@ app = FastAPI(
     description="Host DLP events collection and dashboard API.",
     lifespan=lifespan,
 )
+dashboard_basic = HTTPBasic(auto_error=False)
 
 class LogCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
@@ -200,6 +256,64 @@ def verify_agent_token(
         AGENT_API_TOKEN.encode("ascii"),
     ):
         raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
+
+
+def dashboard_role(
+    credentials: HTTPBasicCredentials | None,
+) -> Literal["viewer", "admin"]:
+    if credentials is not None:
+        try:
+            provided_username = credentials.username.encode("ascii")
+            provided_password = credentials.password.encode("ascii")
+        except UnicodeEncodeError:
+            pass
+        else:
+            for role, username, password in (
+                ("admin", DASHBOARD_ADMIN_USERNAME, DASHBOARD_ADMIN_PASSWORD),
+                ("viewer", DASHBOARD_VIEWER_USERNAME, DASHBOARD_VIEWER_PASSWORD),
+            ):
+                username_matches = compare_digest(
+                    provided_username,
+                    username.encode("ascii"),
+                )
+                password_matches = compare_digest(
+                    provided_password,
+                    password.encode("ascii"),
+                )
+                if username_matches and password_matches:
+                    return role
+    raise HTTPException(
+        status_code=401,
+        detail="Invalid or missing dashboard credentials.",
+        headers={"WWW-Authenticate": 'Basic realm="Host DLP Dashboard"'},
+    )
+
+
+def verify_dashboard_viewer(
+    credentials: Annotated[
+        HTTPBasicCredentials | None,
+        Depends(dashboard_basic),
+    ],
+) -> None:
+    if DASHBOARD_AUTH_ENABLED:
+        dashboard_role(credentials)
+
+
+def verify_policy_write_access(
+    credentials: Annotated[
+        HTTPBasicCredentials | None,
+        Depends(dashboard_basic),
+    ],
+    x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
+) -> None:
+    if not DASHBOARD_AUTH_ENABLED:
+        verify_agent_token(x_agent_token)
+        return
+    if dashboard_role(credentials) != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Dashboard admin credentials are required.",
+        )
 
 
 def normalize_text_items(items: list[str]) -> set[str]:
@@ -631,6 +745,7 @@ async def health_check() -> dict:
         "analysis_mode": "external" if get_external_analyze_url() else "mock",
         "ai_server_url_configured": bool(get_external_analyze_url()),
         "high_risk_score_threshold": HIGH_RISK_SCORE_THRESHOLD,
+        "dashboard_auth_enabled": DASHBOARD_AUTH_ENABLED,
     }
 
 
@@ -640,14 +755,14 @@ async def agent_connection_check() -> dict:
     return {"status": "ok", "agent_token": "accepted"}
 
 
-@app.get("/dashboard")
+@app.get("/dashboard", dependencies=[Depends(verify_dashboard_viewer)])
 async def dashboard() -> FileResponse:
     if not FRONTEND_PATH.exists():
         raise HTTPException(status_code=404, detail="Dashboard file not found.")
     return FileResponse(FRONTEND_PATH)
 
 
-@app.get("/logs")
+@app.get("/logs", dependencies=[Depends(verify_dashboard_viewer)])
 async def logs_page() -> FileResponse:
     if not FRONTEND_PATH.exists():
         raise HTTPException(status_code=404, detail="Dashboard file not found.")
@@ -754,7 +869,7 @@ def create_log(
     )
 
 
-@app.get("/api/v1/logs")
+@app.get("/api/v1/logs", dependencies=[Depends(verify_dashboard_viewer)])
 def list_logs(
     limit: int = Query(default=50, ge=1, le=200),
     action: str | None = Query(default=None),
@@ -812,7 +927,7 @@ def list_logs(
     return {"items": [serialize_log(row) for row in rows], "count": len(rows)}
 
 
-@app.get("/api/v1/alerts")
+@app.get("/api/v1/alerts", dependencies=[Depends(verify_dashboard_viewer)])
 def list_realtime_alerts(
     after_log_id: int | None = Query(default=None, ge=0),
     cursor_epoch: str | None = Query(default=None, min_length=1, max_length=64),
@@ -880,7 +995,10 @@ def list_realtime_alerts(
     }
 
 
-@app.get("/api/v1/logs/filter-options")
+@app.get(
+    "/api/v1/logs/filter-options",
+    dependencies=[Depends(verify_dashboard_viewer)],
+)
 def log_filter_options() -> dict:
     with closing(get_connection()) as connection:
         departments = connection.execute(
@@ -917,7 +1035,7 @@ def log_filter_options() -> dict:
     }
 
 
-@app.get("/api/v1/logs/{log_id}")
+@app.get("/api/v1/logs/{log_id}", dependencies=[Depends(verify_dashboard_viewer)])
 def get_log(log_id: int) -> dict:
     with closing(get_connection()) as connection:
         row = connection.execute("SELECT * FROM dlp_logs WHERE log_id = ?", (log_id,)).fetchone()
@@ -927,7 +1045,7 @@ def get_log(log_id: int) -> dict:
     return serialize_log(row)
 
 
-@app.get("/api/v1/policies")
+@app.get("/api/v1/policies", dependencies=[Depends(verify_dashboard_viewer)])
 def list_policies() -> dict:
     with closing(get_connection()) as connection:
         rows = connection.execute(
@@ -939,7 +1057,7 @@ def list_policies() -> dict:
 @app.post("/api/v1/policies", status_code=201)
 def create_policy(
     payload: PolicyCreate,
-    _: None = Depends(verify_agent_token),
+    _: None = Depends(verify_policy_write_access),
 ) -> dict:
     if payload.block_threshold < payload.ai_threshold:
         raise HTTPException(
@@ -970,7 +1088,10 @@ def create_policy(
     return {"message": "Policy saved successfully.", "policy_id": policy_id}
 
 
-@app.get("/api/v1/dashboard/summary")
+@app.get(
+    "/api/v1/dashboard/summary",
+    dependencies=[Depends(verify_dashboard_viewer)],
+)
 def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
     today = datetime.now(timezone.utc).date()
     since = datetime.combine(

@@ -6,6 +6,7 @@ Host Agent가 전송한 민감정보 반출 탐지 로그를 저장하고, 관�
 
 - Host Agent 로그 수집과 `event_id` 기반 중복 저장 방지
 - Agent 전용 토큰 인증
+- 선택형 viewer/admin HTTP Basic 대시보드 접근 제어
 - 탐지 로그 검색, 필터, 목록 및 상세 조회
 - 최근 7일 KPI, 탐지 추이, 채널 분포, 부서별 탐지 건수 시각화
 - 고위험 이벤트와 Evidence 상세 분석
@@ -80,6 +81,10 @@ python -m pip install -r requirements-dev.txt
 | `AI_SERVER_TOKEN` | 외부 AI 사용 시 필수 | 미사용 | 외부 AI 서버의 `AI_API_TOKEN`과 같은 32자 이상 ASCII Bearer 토큰 |
 | `AI_SERVER_TIMEOUT_SECONDS` | 선택 | `5` | 외부 AI 서버 응답 대기 시간(초) |
 | `HIGH_RISK_SCORE_THRESHOLD` | 선택 | `0.85` | Web 대시보드에서 고위험으로 표시할 AI 점수 임계값. `0.0`~`1.0` |
+| `DASHBOARD_VIEWER_USERNAME` | 인증 활성 시 필수 | 인증 비활성 | 대시보드를 조회할 viewer ASCII 사용자명 |
+| `DASHBOARD_VIEWER_PASSWORD` | 인증 활성 시 필수 | 인증 비활성 | viewer의 16자 이상 ASCII 비밀번호 |
+| `DASHBOARD_ADMIN_USERNAME` | 인증 활성 시 필수 | 인증 비활성 | viewer와 다른 admin ASCII 사용자명 |
+| `DASHBOARD_ADMIN_PASSWORD` | 인증 활성 시 필수 | 인증 비활성 | admin의 16자 이상 ASCII 비밀번호 |
 
 팀 공유 또는 시연 환경에서는 예시 파일을 복사한 뒤 토큰을 반드시 교체합니다.
 
@@ -114,7 +119,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --env-file .env
 | Swagger API 문서 | `http://127.0.0.1:8000/docs` |
 | 상태 확인 | `http://127.0.0.1:8000/health` |
 
-`/health`의 `analysis_mode`가 `mock`이면 내부 Mock 분석, `external`이면 외부 AI 서버 전달 모드입니다.
+`/health`의 `analysis_mode`가 `mock`이면 내부 Mock 분석, `external`이면 외부 AI 서버 전달 모드입니다. `dashboard_auth_enabled`로 비밀값 노출 없이 대시보드 인증 활성 여부를 확인할 수 있습니다.
 
 ### 5.3 두 컴퓨터 시연
 
@@ -135,23 +140,36 @@ logging:
   send_immediately: true
 ```
 
-대시보드를 먼저 연 뒤 Host Agent에서 반출 시나리오를 실행하면, 새 `BLOCKED` 이벤트 또는 설정한 고위험 AI 점수 임계값 이상 이벤트가 약 2초 안에 다른 컴퓨터의 대시보드에 표시됩니다. 두 컴퓨터 사이에서 TCP 8000 포트 접근이 가능해야 합니다. 본 앱은 브라우저 API를 same-origin으로만 사용하며 cross-origin 요청을 허용하지 않습니다. 조회 API에는 관리자 로그인이 없으므로 통제된 시연 LAN 밖에 공개하지 않고, 외부 서버는 HTTPS·인증 reverse proxy를 먼저 적용합니다.
+대시보드를 먼저 연 뒤 Host Agent에서 반출 시나리오를 실행하면, 새 `BLOCKED` 이벤트 또는 설정한 고위험 AI 점수 임계값 이상 이벤트가 약 2초 안에 다른 컴퓨터의 대시보드에 표시됩니다. 두 컴퓨터 사이에서 TCP 8000 포트 접근이 가능해야 합니다. 본 앱은 브라우저 API를 same-origin으로만 사용하며 cross-origin 요청을 허용하지 않습니다. 통제된 LAN 밖에서 HTTP Basic을 사용할 때는 평문 HTTP로 자격 증명을 전송하지 않도록 반드시 HTTPS reverse proxy 뒤에 배치합니다.
+
+### 5.4 대시보드 HTTP Basic 인증
+
+기본은 기존 통제 LAN 시연과의 호환을 위해 인증을 비활성화합니다. `DASHBOARD_VIEWER_USERNAME`, `DASHBOARD_VIEWER_PASSWORD`, `DASHBOARD_ADMIN_USERNAME`, `DASHBOARD_ADMIN_PASSWORD` 네 값을 모두 설정하면 인증이 활성화됩니다. 일부만 설정하거나, 두 사용자명이 같거나, 비밀번호가 16자 미만이거나 non-ASCII면 서버가 즉시 시작을 중단합니다. HTTP Basic 호환을 위해 사용자명도 ASCII이며 `:`를 포함하지 않아야 합니다.
+
+- viewer와 admin은 `/dashboard`, `/logs` 및 대시보드 조회 API를 사용할 수 있습니다.
+- `POST /api/v1/policies`는 인증 활성 시 admin만 호출할 수 있으며 viewer는 HTTP `403`을 받습니다. 인증 비활성 시에는 기존처럼 `X-Agent-Token`을 사용합니다.
+- `/api/v1/agent-check`, `POST /api/v1/analyze`, `POST /api/v1/logs`는 대시보드 인증 여부와 관계없이 계속 `X-Agent-Token`만 사용합니다.
+- `/health`는 공개 상태 확인용으로 유지되며 `dashboard_auth_enabled`만 노출하고 사용자명과 비밀번호는 노출하지 않습니다.
+
+브라우저로 `/dashboard`를 열면 HTTP `401` 응답의 Basic 인증 창이 나타납니다. 한 번 인증하면 브라우저가 같은 origin의 `fetch` 요청에 Basic 자격 증명을 자동으로 재사용하므로 별도 로그인 UI나 JavaScript 세션 저장이 필요하지 않습니다. HTTP Basic은 자격 증명을 암호화하지 않으므로 외부에 공개하는 서버에서는 반드시 HTTPS reverse proxy 뒤에서만 사용합니다.
+
+Host 통합 검증기가 저장 후 `GET /api/v1/logs`로 readback할 때도 인증이 활성화되어 있으면 Web 서버와 같은 `DASHBOARD_VIEWER_USERNAME`, `DASHBOARD_VIEWER_PASSWORD`를 HTTP Basic으로 전송해야 합니다. `X-Agent-Token`은 Agent 쓰기 API용이므로 인증이 활성화된 조회 API의 readback 자격 증명을 대신하지 않습니다.
 
 ## 6. 주요 API
 
-| Method | Path | 토큰 | 용도 |
+| Method | Path | 인증 | 용도 |
 | --- | --- | --- | --- |
 | `GET` | `/health` | 불필요 | 서버와 AI 분석 모드 확인 |
 | `GET` | `/api/v1/agent-check` | `X-Agent-Token` | 로그를 남기지 않고 Host 인증·연결 확인 |
 | `POST` | `/api/v1/analyze` | `X-Agent-Token` | Mock 또는 외부 AI 분석 요청 |
 | `POST` | `/api/v1/logs` | `X-Agent-Token` | Host Agent 탐지 로그 저장 |
-| `GET` | `/api/v1/logs` | 불필요 | 로그 검색 및 필터 조회 |
-| `GET` | `/api/v1/logs/filter-options` | 불필요 | 부서·사용자·Agent 필터 목록 조회 |
-| `GET` | `/api/v1/logs/{log_id}` | 불필요 | 개별 로그 상세 조회 |
-| `GET` | `/api/v1/dashboard/summary` | 불필요 | 최근 기간 KPI와 차트 데이터 조회 |
-| `GET` | `/api/v1/alerts` | 불필요 | 고위험 신규 로그를 `log_id` 커서로 조회 |
-| `GET` | `/api/v1/policies` | 불필요 | 정책 목록 조회 |
-| `POST` | `/api/v1/policies` | `X-Agent-Token` | 정책 생성 |
+| `GET` | `/api/v1/logs` | HTTP Basic(활성 시) | 로그 검색 및 필터 조회 |
+| `GET` | `/api/v1/logs/filter-options` | HTTP Basic(활성 시) | 부서·사용자·Agent 필터 목록 조회 |
+| `GET` | `/api/v1/logs/{log_id}` | HTTP Basic(활성 시) | 개별 로그 상세 조회 |
+| `GET` | `/api/v1/dashboard/summary` | HTTP Basic(활성 시) | 최근 기간 KPI와 차트 데이터 조회 |
+| `GET` | `/api/v1/alerts` | HTTP Basic(활성 시) | 고위험 신규 로그를 `log_id` 커서로 조회 |
+| `GET` | `/api/v1/policies` | HTTP Basic(활성 시) | 정책 목록 조회 |
+| `POST` | `/api/v1/policies` | admin Basic(활성) / `X-Agent-Token`(비활성) | 정책 생성 |
 
 정확한 요청 필드와 허용값은 실행 중인 서버의 `/docs`에서 확인할 수 있습니다.
 
@@ -410,7 +428,8 @@ SQLite 파일은 `backend/dlp_dashboard.db`에 생성되지만 Git에는 포함�
 | `200` | 조회 성공, AI 분석 성공 또는 중복 로그 재전송 |
 | `201` | 신규 로그 또는 정책 저장 성공 |
 | `400` | 정책의 차단 임계치가 AI 임계치보다 낮음 |
-| `401` | `X-Agent-Token` 누락 또는 불일치 |
+| `401` | `X-Agent-Token` 또는 활성화된 대시보드 Basic 자격 증명 누락·불일치 |
+| `403` | viewer 자격 증명으로 정책 생성 시도 |
 | `404` | 존재하지 않는 로그 또는 프론트 파일 조회 |
 | `422` | 필수 필드 누락, 허용값 위반 또는 타입 오류 |
 | `502` | 외부 AI 서버 연결 실패 또는 잘못된 응답 |
@@ -573,6 +592,7 @@ python -m pytest -q
 - 테이블 생성과 기본 정책 시드
 - 대시보드·로그 화면과 헬스체크
 - Agent 토큰 인증 성공·실패
+- 대시보드 인증 설정 fail-fast, viewer/admin 조회 권한과 정책 쓰기 403
 - Mock AI 분석
 - 로그 저장, 상세 조회와 실제 SQLite 반영
 - 동일 `event_id` 재전송 중복 방지
@@ -632,7 +652,7 @@ python scripts/send_sample_log.py --scenario all --interval 2.5
 ## 11. 현재 제한사항
 
 - 실제 Host Agent와 AI 서버의 최종 E2E 통합은 아직 진행 전입니다.
-- 관리자 로그인과 역할 기반 접근 제어가 없습니다.
+- 선택형 viewer/admin HTTP Basic만 제공하며 세션 기반 로그인과 세분화된 RBAC는 없습니다.
 - 정책 UI는 제거된 상태이며 정책 수정·삭제 API는 없습니다.
 - 데이터 저장소는 SQLite이며 운영 DB 전환은 진행 전입니다.
 - 서버 배포에서 SQLite를 유지하려면 `backend/dlp_dashboard.db`가 있는 경로를 영구 볼륨에 보존하고 단일 Web 프로세스로 실행해야 합니다.

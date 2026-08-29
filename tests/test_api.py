@@ -16,6 +16,18 @@ from fastapi.testclient import TestClient
 from backend import main
 
 
+VIEWER_CREDENTIALS = ("dashboard-viewer", "viewer-password-2026")
+ADMIN_CREDENTIALS = ("dashboard-admin", "admin-password-2026")
+
+
+def enable_dashboard_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main, "DASHBOARD_AUTH_ENABLED", True)
+    monkeypatch.setattr(main, "DASHBOARD_VIEWER_USERNAME", VIEWER_CREDENTIALS[0])
+    monkeypatch.setattr(main, "DASHBOARD_VIEWER_PASSWORD", VIEWER_CREDENTIALS[1])
+    monkeypatch.setattr(main, "DASHBOARD_ADMIN_USERNAME", ADMIN_CREDENTIALS[0])
+    monkeypatch.setattr(main, "DASHBOARD_ADMIN_PASSWORD", ADMIN_CREDENTIALS[1])
+
+
 def make_log_payload(
     event_id: str,
     *,
@@ -163,6 +175,7 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
     assert health.json()["analysis_mode"] == "mock"
     assert health.json()["ai_server_url_configured"] is False
     assert health.json()["high_risk_score_threshold"] == main.HIGH_RISK_SCORE_THRESHOLD
+    assert health.json()["dashboard_auth_enabled"] is False
 
     for path in ("/dashboard", "/logs"):
         response = client.get(path)
@@ -173,6 +186,129 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
         assert 'id="analysisMode"' in response.text
         assert "Web 분석" in response.text
         assert "AI 모델 버전" in response.text
+
+
+def test_dashboard_auth_configuration_is_disabled_only_when_all_values_are_empty() -> None:
+    assert main.validate_dashboard_auth_configuration("", "", "", "") is False
+    assert main.validate_dashboard_auth_configuration(
+        VIEWER_CREDENTIALS[0],
+        VIEWER_CREDENTIALS[1],
+        ADMIN_CREDENTIALS[0],
+        ADMIN_CREDENTIALS[1],
+    ) is True
+
+
+@pytest.mark.parametrize(
+    ("viewer_username", "viewer_password", "admin_username", "admin_password"),
+    [
+        (VIEWER_CREDENTIALS[0], VIEWER_CREDENTIALS[1], "", ""),
+        ("same-user", VIEWER_CREDENTIALS[1], "same-user", ADMIN_CREDENTIALS[1]),
+        (VIEWER_CREDENTIALS[0], "short", ADMIN_CREDENTIALS[0], ADMIN_CREDENTIALS[1]),
+        (VIEWER_CREDENTIALS[0], VIEWER_CREDENTIALS[1], ADMIN_CREDENTIALS[0], "비밀번호" * 4),
+    ],
+)
+def test_dashboard_auth_configuration_rejects_unsafe_values(
+    viewer_username: str,
+    viewer_password: str,
+    admin_username: str,
+    admin_password: str,
+) -> None:
+    with pytest.raises(RuntimeError):
+        main.validate_dashboard_auth_configuration(
+            viewer_username,
+            viewer_password,
+            admin_username,
+            admin_password,
+        )
+
+
+@pytest.mark.parametrize(
+    "credentials",
+    [
+        main.HTTPBasicCredentials(username="viewer-사용자", password=VIEWER_CREDENTIALS[1]),
+        main.HTTPBasicCredentials(username=VIEWER_CREDENTIALS[0], password="비밀번호"),
+    ],
+)
+def test_dashboard_role_rejects_non_ascii_request_credentials_with_401(
+    credentials: main.HTTPBasicCredentials,
+) -> None:
+    with pytest.raises(main.HTTPException) as error:
+        main.dashboard_role(credentials)
+
+    assert error.value.status_code == 401
+    assert error.value.headers == {
+        "WWW-Authenticate": 'Basic realm="Host DLP Dashboard"'
+    }
+
+
+def test_dashboard_auth_protects_pages_and_all_read_apis(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enable_dashboard_auth(monkeypatch)
+    saved = post_log(
+        client,
+        agent_headers,
+        make_log_payload("dashboard-auth-read-test"),
+    )
+    protected_paths = (
+        "/dashboard",
+        "/logs",
+        "/api/v1/logs",
+        "/api/v1/alerts",
+        "/api/v1/logs/filter-options",
+        f"/api/v1/logs/{saved['log_id']}",
+        "/api/v1/policies",
+        "/api/v1/dashboard/summary",
+    )
+
+    for path in protected_paths:
+        rejected = client.get(path)
+        assert rejected.status_code == 401, path
+        assert rejected.headers["www-authenticate"] == 'Basic realm="Host DLP Dashboard"'
+        assert client.get(path, auth=VIEWER_CREDENTIALS).status_code == 200, path
+        assert client.get(path, auth=ADMIN_CREDENTIALS).status_code == 200, path
+
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.json()["dashboard_auth_enabled"] is True
+    assert VIEWER_CREDENTIALS[0] not in health.text
+    assert VIEWER_CREDENTIALS[1] not in health.text
+    assert ADMIN_CREDENTIALS[0] not in health.text
+    assert ADMIN_CREDENTIALS[1] not in health.text
+
+
+def test_dashboard_basic_credentials_do_not_replace_agent_token(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enable_dashboard_auth(monkeypatch)
+
+    assert client.get("/api/v1/agent-check", auth=ADMIN_CREDENTIALS).status_code == 401
+    assert client.post(
+        "/api/v1/analyze",
+        auth=ADMIN_CREDENTIALS,
+        json=make_analyze_payload("dashboard-basic-not-agent-token"),
+    ).status_code == 401
+    assert client.post(
+        "/api/v1/logs",
+        auth=ADMIN_CREDENTIALS,
+        json=make_log_payload("dashboard-basic-not-agent-log-token"),
+    ).status_code == 401
+
+    assert client.get("/api/v1/agent-check", headers=agent_headers).status_code == 200
+    assert client.post(
+        "/api/v1/analyze",
+        headers=agent_headers,
+        json=make_analyze_payload("agent-token-still-analyzes"),
+    ).status_code == 200
+    assert client.post(
+        "/api/v1/logs",
+        headers=agent_headers,
+        json=make_log_payload("agent-token-still-logs"),
+    ).status_code == 201
 
 
 def test_agent_connection_check_verifies_token_without_creating_log(
@@ -1073,6 +1209,43 @@ def test_policy_create_requires_agent_token(
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid or missing agent token."
+
+
+def test_dashboard_policy_write_requires_admin_when_auth_is_enabled(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enable_dashboard_auth(monkeypatch)
+    payload = {
+        "policy_name": "dashboard-admin-policy",
+        "ai_threshold": 0.6,
+        "block_threshold": 0.8,
+    }
+
+    missing = client.post("/api/v1/policies", json=payload)
+    agent_only = client.post(
+        "/api/v1/policies",
+        headers=agent_headers,
+        json=payload,
+    )
+    viewer = client.post(
+        "/api/v1/policies",
+        auth=VIEWER_CREDENTIALS,
+        json=payload,
+    )
+    admin = client.post(
+        "/api/v1/policies",
+        auth=ADMIN_CREDENTIALS,
+        json=payload,
+    )
+
+    assert missing.status_code == 401
+    assert missing.headers["www-authenticate"] == 'Basic realm="Host DLP Dashboard"'
+    assert agent_only.status_code == 401
+    assert viewer.status_code == 403
+    assert viewer.json()["detail"] == "Dashboard admin credentials are required."
+    assert admin.status_code == 201
 
 
 class FakeExternalResponse:

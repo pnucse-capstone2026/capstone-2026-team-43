@@ -6,6 +6,7 @@ Host Agent가 전송한 민감정보 반출 탐지 로그를 저장하고, 관�
 
 - Host Agent 로그 수집과 `event_id` 기반 중복 저장 방지
 - Agent 전용 토큰 인증
+- Agent 프로세스 heartbeat 저장과 90초 기준 생존 상태·버전 조회
 - 선택형 viewer/admin HTTP Basic 대시보드 접근 제어
 - 탐지 로그 검색, 필터, 목록 및 상세 조회
 - 최근 7일 KPI, 탐지 추이, 채널 분포, 부서별 탐지 건수 시각화
@@ -148,7 +149,8 @@ logging:
 
 - viewer와 admin은 `/dashboard`, `/logs` 및 대시보드 조회 API를 사용할 수 있습니다.
 - `POST /api/v1/policies`는 인증 활성 시 admin만 호출할 수 있으며 viewer는 HTTP `403`을 받습니다. 인증 비활성 시에는 기존처럼 `X-Agent-Token`을 사용합니다.
-- `/api/v1/agent-check`, `POST /api/v1/analyze`, `POST /api/v1/logs`는 대시보드 인증 여부와 관계없이 계속 `X-Agent-Token`만 사용합니다.
+- `/api/v1/agent-check`, `POST /api/v1/analyze`, `POST /api/v1/logs`, `POST /api/v1/agents/heartbeat`는 대시보드 인증 여부와 관계없이 계속 `X-Agent-Token`만 사용합니다.
+- `GET /api/v1/agents`는 다른 조회 API와 동일하게 인증 활성 시 viewer/admin Basic 자격 증명이 필요하며 `X-Agent-Token`으로 대신할 수 없습니다.
 - `/health`는 공개 상태 확인용으로 유지되며 `dashboard_auth_enabled`만 노출하고 사용자명과 비밀번호는 노출하지 않습니다.
 
 브라우저로 `/dashboard`를 열면 HTTP `401` 응답의 Basic 인증 창이 나타납니다. 한 번 인증하면 브라우저가 같은 origin의 `fetch` 요청에 Basic 자격 증명을 자동으로 재사용하므로 별도 로그인 UI나 JavaScript 세션 저장이 필요하지 않습니다. HTTP Basic은 자격 증명을 암호화하지 않으므로 외부에 공개하는 서버에서는 반드시 HTTPS reverse proxy 뒤에서만 사용합니다.
@@ -161,6 +163,8 @@ Host 통합 검증기가 저장 후 `GET /api/v1/logs`로 readback할 때도 인
 | --- | --- | --- | --- |
 | `GET` | `/health` | 불필요 | 서버·SQLite 준비 상태와 AI 분석 모드 확인 |
 | `GET` | `/api/v1/agent-check` | `X-Agent-Token` | 로그를 남기지 않고 Host 인증·연결 확인 |
+| `POST` | `/api/v1/agents/heartbeat` | `X-Agent-Token` | Agent 프로세스 생존 시각과 버전 upsert |
+| `GET` | `/api/v1/agents` | HTTP Basic(활성 시) | Agent 프로세스별 online/stale 상태 조회 |
 | `POST` | `/api/v1/analyze` | `X-Agent-Token` | Mock 또는 외부 AI 분석 요청 |
 | `POST` | `/api/v1/logs` | `X-Agent-Token` | Host Agent 탐지 로그 저장 |
 | `GET` | `/api/v1/logs` | HTTP Basic(활성 시) | 로그 검색·필터와 서버 페이지 조회 |
@@ -204,7 +208,22 @@ Host 통합 검증기가 저장 후 `GET /api/v1/logs`로 readback할 때도 인
 
 `HIGH_RISK_SCORE_THRESHOLD`는 Web의 고위험 표시 기준만 바꾸며 Host Agent가 기록한 `action_taken`을 다시 계산하지 않습니다. 값을 바꾼 뒤에는 Web 서버를 재시작하고 `/health`의 `high_risk_score_threshold`로 적용값을 확인합니다.
 
-### 6.2 Agent 로그 연동 규칙
+### 6.2 Agent 프로세스 heartbeat
+
+Host Agent는 `POST /api/v1/agents/heartbeat`에 다음 네 필드를 보내 프로세스 생존 상태를 보고할 수 있습니다. Web 서버는 클라이언트 시각을 받지 않고 수신 시각을 `last_seen_at`으로 기록하며, 같은 `(agent_id, mode)`는 새 행을 늘리지 않고 최신 hostname·버전·시각으로 갱신합니다.
+
+| 필드 | 제약 및 설명 |
+| --- | --- |
+| `agent_id` | 1~100자. 장치를 구분하는 안정적인 Agent 식별자 |
+| `hostname` | 1~100자. 보고한 Host 이름 |
+| `agent_version` | 1~50자의 영문·숫자와 `.`, `_`, `+`, `-` 조합 |
+| `mode` | `user`, `system`, `all` 중 하나. 같은 장치의 실행 프로세스를 구분 |
+
+`GET /api/v1/agents`는 마지막 보고 후 90초 이내인 행을 `online`, 그보다 오래된 행을 `stale`로 계산하고 `online_count`, `stale_count`, `heartbeat_ttl_seconds`, 서버 확인 시각을 반환합니다. 대시보드 상단도 이 API를 처음 열 때와 이후 30초마다 조회해 프로세스 수와 보고된 버전을 표시합니다. 브라우저 탭이 숨겨지면 폴링을 멈추고 다시 보일 때 즉시 재개합니다.
+
+이 상태는 **Agent 프로세스가 heartbeat를 보냈다는 사실만** 나타냅니다. Clipboard·USB·Outlook·WebProxy 등 개별 채널이 정상인지, 실제 Windows 훅이 동작했는지 또는 LAN 시연이 완료됐다는 증거가 아닙니다. 종료·장애 시 별도 offline 요청에 의존하지 않고 90초 후 `stale`로 전환됩니다.
+
+### 6.3 Agent 로그 연동 규칙
 
 - 요청 헤더: `X-Agent-Token: <AGENT_API_TOKEN>`
 - `timestamp`: UTC offset을 포함한 ISO 8601 형식 필수
@@ -221,7 +240,7 @@ Host 통합 검증기가 저장 후 `GET /api/v1/logs`로 readback할 때도 인
 python scripts/send_sample_log.py --scenario web_upload --dry-run
 ```
 
-### 6.3 로그 수집 요청 데이터 구조
+### 6.4 로그 수집 요청 데이터 구조
 
 Host Agent는 `POST /api/v1/logs`로 탐지 결과를 전송합니다. 요청 헤더에는 서버의 `AGENT_API_TOKEN`과 동일한 `X-Agent-Token`을 포함해야 합니다.
 
@@ -297,7 +316,7 @@ Host Agent는 `POST /api/v1/logs`로 탐지 결과를 전송합니다. 요청 �
 }
 ```
 
-### 6.4 AI 분석 요청·응답 구조
+### 6.5 AI 분석 요청·응답 구조
 
 Host Agent가 웹 서버의 분석 중계 API를 사용할 경우 `POST /api/v1/analyze`를 호출합니다. `AI_SERVER_URL`이 비어 있으면 Mock 분석 결과를 반환하고, 값이 있으면 동일 요청을 외부 AI 서버로 전달합니다.
 
@@ -370,7 +389,7 @@ Web 분석 fixture가 AI 판정을 로그 필드로 바꿀 때 사용하는 기�
 
 외부 AI 서버는 `confidence_score` 대신 `ai_score` 또는 `score`를 반환할 수 있습니다. `1` 초과 `100` 이하의 점수는 웹 서버가 `0.0`~`1.0` 범위로 변환합니다.
 
-### 6.5 SQLite 데이터 구조
+### 6.6 SQLite 데이터 구조
 
 SQLite 파일은 `backend/dlp_dashboard.db`에 생성되지만 Git에는 포함하지 않습니다. 팀원 간 데이터 연동은 DB 파일을 공유하지 않고 위 REST API 계약을 기준으로 합니다.
 
@@ -427,11 +446,23 @@ SQLite 파일은 `backend/dlp_dashboard.db`에 생성되지만 Git에는 포함�
 | `metadata_key` | TEXT | Primary Key. 현재 `database_epoch` 사용 |
 | `metadata_value` | TEXT | DB 생성 시 발급한 UUID. 알림 커서의 DB 세대 식별자 |
 
-### 6.6 주요 HTTP 상태 코드
+`dlp_agent_heartbeats` 테이블:
+
+| 컬럼 | SQLite 타입 | 제약 및 설명 |
+| --- | --- | --- |
+| `agent_id` | TEXT | mode와 함께 Primary Key를 구성하는 Agent 식별자 |
+| `mode` | TEXT | `user`, `system`, `all` 중 하나 |
+| `hostname` | TEXT | 가장 최근 heartbeat가 보고한 Host 이름 |
+| `agent_version` | TEXT | 가장 최근 heartbeat가 보고한 Agent 버전 |
+| `last_seen_at` | TEXT | Web 서버가 기록한 최근 수신 시각, UTC ISO 8601 |
+
+기존 SQLite 파일에는 서버 시작 시 이 테이블만 비어 있는 상태로 추가됩니다. 기존 로그·정책·DB 세대 ID는 수정하거나 삭제하지 않으며 heartbeat 샘플 행도 자동 생성하지 않습니다.
+
+### 6.7 주요 HTTP 상태 코드
 
 | 상태 코드 | 발생 조건 |
 | --- | --- |
-| `200` | 조회 성공, AI 분석 성공 또는 중복 로그 재전송 |
+| `200` | 조회·AI 분석·heartbeat 저장 성공 또는 중복 로그 재전송 |
 | `201` | 신규 로그 또는 정책 저장 성공 |
 | `400` | 정책의 차단 임계치가 AI 임계치보다 낮음 |
 | `401` | `X-Agent-Token` 또는 활성화된 대시보드 Basic 자격 증명 누락·불일치 |
@@ -598,6 +629,7 @@ python -m pytest -q
 - 테이블 생성과 기본 정책 시드
 - 대시보드·로그 화면과 SQLite 준비 상태 헬스체크
 - Agent 토큰 인증 성공·실패
+- Agent heartbeat 인증, strict payload, mode별 upsert, 90초 online/stale 집계와 기존 DB 호환
 - 대시보드 인증 설정 fail-fast, viewer/admin 조회 권한과 정책 쓰기 403
 - Mock AI 분석
 - 로그 저장, 상세 조회와 실제 SQLite 반영
@@ -663,6 +695,8 @@ python scripts/send_sample_log.py --scenario all --interval 2.5
 - 데이터 저장소는 SQLite이며 운영 DB 전환은 진행 전입니다.
 - 서버 배포에서 SQLite를 유지하려면 `backend/dlp_dashboard.db`가 있는 경로를 영구 볼륨에 보존하고 단일 Web 프로세스로 실행해야 합니다.
 - 위험 알림은 WebSocket/SSE가 아닌 약 2초 주기 HTTP 폴링이며, 화면이 열려 있는 시연·프로토타입 범위입니다.
+- Agent 표시는 30초 주기로 조회한 프로세스 heartbeat 생존 상태일 뿐 개별 탐지 채널 건강 상태가 아니며, 실제 Windows/LAN 환경 검증은 아직 수행하지 않았습니다.
+- 모든 Agent가 하나의 공유 토큰을 사용하므로 운영용 장치별 신원 증명이나 위조 방지 기능은 아니며, `agent_id`는 장치마다 고유하게 설정해야 합니다.
 - `send_sample_log.py --scenario all`은 `PRINT`·`MESSENGER`를 포함한 Web 표시용 fixture 7건을 전송할 뿐입니다. 실제 Host 연동은 5개 채널이며, 메신저는 `CLIPBOARD` 경로로 검사하고 `PRINT`는 미지원입니다.
 - `send_sample_log.py`는 Windows의 USB·클립보드·이메일 등을 실제로 감지하거나 차단하지 않습니다.
 - Host Agent의 USB `BLOCKED`는 대상 파일의 사후 삭제가 실제로 성공한 경우에만 기록합니다. 삭제 직전·도중 파일이 없어졌거나, 분석 뒤 파일 지문이 바뀌었거나, 권한·잠금·드라이브 이탈로 삭제를 확인할 수 없으면 다른 파일을 삭제하지 않고 `WARNED`와 실패 사유로 기록합니다.

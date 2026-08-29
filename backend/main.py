@@ -31,6 +31,7 @@ AI_SERVER_URL = os.getenv("AI_SERVER_URL", "").strip()
 AI_SERVER_TOKEN = os.getenv("AI_SERVER_TOKEN", "").strip()
 AI_SERVER_TIMEOUT_SECONDS = float(os.getenv("AI_SERVER_TIMEOUT_SECONDS", "5"))
 DATABASE_EPOCH_KEY = "database_epoch"
+AGENT_HEARTBEAT_TTL_SECONDS = 90
 MAX_AI_RESPONSE_BYTES = 64 * 1024
 UNSAFE_TOKEN_VALUES = {
     "replace-with-a-long-random-token",
@@ -231,6 +232,20 @@ class AnalyzeResponse(BaseModel):
     latency_ms: int = Field(..., ge=0, le=600000)
     reason: str = Field(..., max_length=500)
     evidence_summary: str = Field(..., max_length=500)
+
+
+class AgentHeartbeat(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    agent_id: str = Field(..., min_length=1, max_length=100)
+    hostname: str = Field(..., min_length=1, max_length=100)
+    agent_version: str = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+    )
+    mode: Literal["user", "system", "all"]
 
 
 class PolicyCreate(BaseModel):
@@ -646,6 +661,18 @@ def init_db() -> None:
             )
             """
         )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dlp_agent_heartbeats (
+                agent_id TEXT NOT NULL,
+                mode TEXT NOT NULL CHECK (mode IN ('user', 'system', 'all')),
+                hostname TEXT NOT NULL,
+                agent_version TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY (agent_id, mode)
+            )
+            """
+        )
 
         policy_count = cursor.execute("SELECT COUNT(*) FROM dlp_policies").fetchone()[0]
         if policy_count == 0:
@@ -727,6 +754,21 @@ def serialize_policy(row: sqlite3.Row) -> dict:
     }
 
 
+def serialize_agent_heartbeat(
+    row: sqlite3.Row,
+    stale_cutoff: datetime,
+) -> dict:
+    last_seen_at = datetime.fromisoformat(row["last_seen_at"])
+    return {
+        "agent_id": row["agent_id"],
+        "mode": row["mode"],
+        "hostname": row["hostname"],
+        "agent_version": row["agent_version"],
+        "last_seen_at": row["last_seen_at"],
+        "status": "online" if last_seen_at >= stale_cutoff else "stale",
+    }
+
+
 @app.get("/")
 async def read_root() -> dict:
     return {
@@ -773,6 +815,68 @@ def health_check() -> dict:
 async def agent_connection_check() -> dict:
     """Verify Agent authentication without creating a dashboard log."""
     return {"status": "ok", "agent_token": "accepted"}
+
+
+@app.post("/api/v1/agents/heartbeat")
+def record_agent_heartbeat(
+    payload: AgentHeartbeat,
+    _: None = Depends(verify_agent_token),
+) -> dict:
+    """Record process liveness using the Web server's clock."""
+    last_seen_at = datetime.now(timezone.utc).isoformat()
+    with closing(get_connection()) as connection:
+        connection.execute(
+            """
+            INSERT INTO dlp_agent_heartbeats (
+                agent_id, mode, hostname, agent_version, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(agent_id, mode) DO UPDATE SET
+                hostname = excluded.hostname,
+                agent_version = excluded.agent_version,
+                last_seen_at = excluded.last_seen_at
+            """,
+            (
+                payload.agent_id,
+                payload.mode,
+                payload.hostname,
+                payload.agent_version,
+                last_seen_at,
+            ),
+        )
+        connection.commit()
+
+    return {
+        "status": "ok",
+        "agent_id": payload.agent_id,
+        "mode": payload.mode,
+        "last_seen_at": last_seen_at,
+    }
+
+
+@app.get("/api/v1/agents", dependencies=[Depends(verify_dashboard_viewer)])
+def list_agent_processes() -> dict:
+    """List heartbeat freshness; this does not assert channel health."""
+    checked_at = datetime.now(timezone.utc)
+    stale_cutoff = checked_at - timedelta(seconds=AGENT_HEARTBEAT_TTL_SECONDS)
+    with closing(get_connection()) as connection:
+        rows = connection.execute(
+            """
+            SELECT agent_id, mode, hostname, agent_version, last_seen_at
+            FROM dlp_agent_heartbeats
+            ORDER BY agent_id ASC, mode ASC
+            """
+        ).fetchall()
+
+    items = [serialize_agent_heartbeat(row, stale_cutoff) for row in rows]
+    online_count = sum(item["status"] == "online" for item in items)
+    return {
+        "items": items,
+        "count": len(items),
+        "online_count": online_count,
+        "stale_count": len(items) - online_count,
+        "heartbeat_ttl_seconds": AGENT_HEARTBEAT_TTL_SECONDS,
+        "checked_at": checked_at.isoformat(),
+    }
 
 
 @app.get("/dashboard", dependencies=[Depends(verify_dashboard_viewer)])

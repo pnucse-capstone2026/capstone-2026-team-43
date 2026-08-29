@@ -82,6 +82,21 @@ def make_analyze_payload(
     }
 
 
+def make_heartbeat_payload(
+    *,
+    agent_id: str = "agent-test-01",
+    hostname: str = "host-agent-test-01",
+    agent_version: str = "0.1.0",
+    mode: str = "user",
+) -> dict:
+    return {
+        "agent_id": agent_id,
+        "hostname": hostname,
+        "agent_version": agent_version,
+        "mode": mode,
+    }
+
+
 def post_log(client: TestClient, headers: dict[str, str], payload: dict) -> dict:
     response = client.post("/api/v1/logs", json=payload, headers=headers)
     assert response.status_code == 201, response.text
@@ -119,6 +134,9 @@ def test_startup_creates_only_the_temporary_database(
         }
         log_count = connection.execute("SELECT COUNT(*) FROM dlp_logs").fetchone()[0]
         policy_count = connection.execute("SELECT COUNT(*) FROM dlp_policies").fetchone()[0]
+        heartbeat_count = connection.execute(
+            "SELECT COUNT(*) FROM dlp_agent_heartbeats"
+        ).fetchone()[0]
         database_epoch = connection.execute(
             """
             SELECT metadata_value
@@ -127,9 +145,15 @@ def test_startup_creates_only_the_temporary_database(
             """
         ).fetchone()[0]
 
-    assert {"dlp_logs", "dlp_policies", "dlp_metadata"}.issubset(tables)
+    assert {
+        "dlp_logs",
+        "dlp_policies",
+        "dlp_metadata",
+        "dlp_agent_heartbeats",
+    }.issubset(tables)
     assert log_count == 0
     assert policy_count == 2
+    assert heartbeat_count == 0
     assert database_epoch
 
 
@@ -165,6 +189,42 @@ def test_log_schema_migration_adds_model_version_to_existing_database() -> None:
         assert tuple(legacy_row) == ("legacy-event", None)
     finally:
         connection.close()
+
+
+def test_existing_database_adds_empty_heartbeat_table_without_changing_data(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    temp_db_path: Path,
+) -> None:
+    post_log(
+        client,
+        agent_headers,
+        make_log_payload("heartbeat-migration-preserved-log"),
+    )
+    with sqlite3.connect(temp_db_path) as connection:
+        connection.execute("DROP TABLE dlp_agent_heartbeats")
+        policy_count_before = connection.execute(
+            "SELECT COUNT(*) FROM dlp_policies"
+        ).fetchone()[0]
+
+    main.init_db()
+    main.init_db()
+
+    with sqlite3.connect(temp_db_path) as connection:
+        preserved_log_count = connection.execute(
+            "SELECT COUNT(*) FROM dlp_logs WHERE event_id = ?",
+            ("heartbeat-migration-preserved-log",),
+        ).fetchone()[0]
+        policy_count_after = connection.execute(
+            "SELECT COUNT(*) FROM dlp_policies"
+        ).fetchone()[0]
+        heartbeat_count = connection.execute(
+            "SELECT COUNT(*) FROM dlp_agent_heartbeats"
+        ).fetchone()[0]
+
+    assert preserved_log_count == 1
+    assert policy_count_after == policy_count_before
+    assert heartbeat_count == 0
 
 
 def test_health_and_frontend_routes(client: TestClient) -> None:
@@ -290,6 +350,7 @@ def test_dashboard_auth_protects_pages_and_all_read_apis(
         "/api/v1/alerts",
         "/api/v1/logs/filter-options",
         f"/api/v1/logs/{saved['log_id']}",
+        "/api/v1/agents",
         "/api/v1/policies",
         "/api/v1/dashboard/summary",
     )
@@ -328,6 +389,15 @@ def test_dashboard_basic_credentials_do_not_replace_agent_token(
         auth=ADMIN_CREDENTIALS,
         json=make_log_payload("dashboard-basic-not-agent-log-token"),
     ).status_code == 401
+    assert client.post(
+        "/api/v1/agents/heartbeat",
+        auth=ADMIN_CREDENTIALS,
+        json=make_heartbeat_payload(),
+    ).status_code == 401
+    assert client.get(
+        "/api/v1/agents",
+        headers=agent_headers,
+    ).status_code == 401
 
     assert client.get("/api/v1/agent-check", headers=agent_headers).status_code == 200
     assert client.post(
@@ -340,6 +410,11 @@ def test_dashboard_basic_credentials_do_not_replace_agent_token(
         headers=agent_headers,
         json=make_log_payload("agent-token-still-logs"),
     ).status_code == 201
+    assert client.post(
+        "/api/v1/agents/heartbeat",
+        headers=agent_headers,
+        json=make_heartbeat_payload(),
+    ).status_code == 200
 
 
 def test_agent_connection_check_verifies_token_without_creating_log(
@@ -360,6 +435,152 @@ def test_agent_connection_check_verifies_token_without_creating_log(
     assert accepted.status_code == 200
     assert accepted.json() == {"status": "ok", "agent_token": "accepted"}
     assert client.get("/api/v1/logs").json()["count"] == 0
+
+
+def test_agent_heartbeat_upserts_each_process_mode_and_reports_stale_status(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    temp_db_path: Path,
+) -> None:
+    before_post = datetime.now(timezone.utc)
+    first = client.post(
+        "/api/v1/agents/heartbeat",
+        headers=agent_headers,
+        json=make_heartbeat_payload(
+            agent_id=" agent-live-01 ",
+            hostname=" demo-host ",
+        ),
+    )
+    after_post = datetime.now(timezone.utc)
+
+    assert first.status_code == 200
+    first_receipt = first.json()
+    first_seen = datetime.fromisoformat(first_receipt["last_seen_at"])
+    assert first_receipt == {
+        "status": "ok",
+        "agent_id": "agent-live-01",
+        "mode": "user",
+        "last_seen_at": first_receipt["last_seen_at"],
+    }
+    assert before_post <= first_seen <= after_post
+
+    updated = client.post(
+        "/api/v1/agents/heartbeat",
+        headers=agent_headers,
+        json=make_heartbeat_payload(
+            agent_id="agent-live-01",
+            hostname="renamed-host",
+            agent_version="0.2.0",
+            mode="user",
+        ),
+    )
+    system = client.post(
+        "/api/v1/agents/heartbeat",
+        headers=agent_headers,
+        json=make_heartbeat_payload(
+            agent_id="agent-live-01",
+            hostname="renamed-host",
+            agent_version="0.2.0",
+            mode="system",
+        ),
+    )
+    assert updated.status_code == 200
+    assert system.status_code == 200
+
+    stale_at = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=main.AGENT_HEARTBEAT_TTL_SECONDS + 1)
+    ).isoformat()
+    with sqlite3.connect(temp_db_path) as connection:
+        connection.execute(
+            """
+            UPDATE dlp_agent_heartbeats
+            SET last_seen_at = ?
+            WHERE agent_id = ? AND mode = ?
+            """,
+            (stale_at, "agent-live-01", "user"),
+        )
+
+    response = client.get("/api/v1/agents")
+    result = response.json()
+
+    assert response.status_code == 200
+    assert result["count"] == 2
+    assert result["online_count"] == 1
+    assert result["stale_count"] == 1
+    assert result["heartbeat_ttl_seconds"] == 90
+    assert datetime.fromisoformat(result["checked_at"]).tzinfo is not None
+    assert result["items"] == [
+        {
+            "agent_id": "agent-live-01",
+            "mode": "system",
+            "hostname": "renamed-host",
+            "agent_version": "0.2.0",
+            "last_seen_at": system.json()["last_seen_at"],
+            "status": "online",
+        },
+        {
+            "agent_id": "agent-live-01",
+            "mode": "user",
+            "hostname": "renamed-host",
+            "agent_version": "0.2.0",
+            "last_seen_at": stale_at,
+            "status": "stale",
+        },
+    ]
+    assert client.get("/api/v1/logs").json()["count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("agent_id", " "),
+        ("agent_id", "a" * 101),
+        ("hostname", ""),
+        ("hostname", "h" * 101),
+        ("agent_version", "version with spaces"),
+        ("agent_version", "v" * 51),
+        ("mode", "service"),
+    ],
+)
+def test_agent_heartbeat_rejects_unbounded_or_invalid_fields(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    field: str,
+    value: str,
+) -> None:
+    payload = make_heartbeat_payload()
+    payload[field] = value
+
+    response = client.post(
+        "/api/v1/agents/heartbeat",
+        headers=agent_headers,
+        json=payload,
+    )
+
+    assert response.status_code == 422
+    assert any(item["loc"][-1] == field for item in response.json()["detail"])
+
+
+def test_frontend_polls_process_liveness_without_claiming_channel_health(
+    client: TestClient,
+) -> None:
+    html = client.get("/dashboard").text
+
+    for marker in (
+        'id="agentProcessStatus"',
+        "Agent 프로세스 heartbeat 생존 상태이며 채널 정상 여부를 의미하지 않습니다.",
+        "const AGENT_STATUS_POLL_INTERVAL_MS = 30000",
+        'fetch("/api/v1/agents", { cache: "no-store" })',
+        "function renderAgentProcessStatus(result)",
+        "function startAgentStatusPolling()",
+        "function stopAgentStatusPolling()",
+        "startAgentStatusPolling();",
+        'setText("agentProcessStatus", `${onlineCount}/${count} ONLINE${versionText}`)',
+    ):
+        assert marker in html
+
+    assert "Agent 채널 정상" not in html
 
 
 def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
@@ -541,6 +762,10 @@ def test_agent_payload_collection_items_have_length_limits(
         ("/api/v1/logs", {**make_log_payload("extra-log-field"), "typo_field": True}),
         ("/api/v1/analyze", {**make_analyze_payload("extra-analysis-field"), "typo_field": True}),
         (
+            "/api/v1/agents/heartbeat",
+            {**make_heartbeat_payload(), "typo_field": True},
+        ),
+        (
             "/api/v1/policies",
             {
                 "policy_name": "extra-policy-field",
@@ -612,11 +837,18 @@ def test_protected_endpoints_reject_invalid_agent_tokens(
         json=make_log_payload("unauthorized-log"),
         headers=headers,
     )
+    heartbeat_response = client.post(
+        "/api/v1/agents/heartbeat",
+        json=make_heartbeat_payload(),
+        headers=headers,
+    )
 
     assert analyze_response.status_code == 401
     assert log_response.status_code == 401
+    assert heartbeat_response.status_code == 401
     assert analyze_response.json()["detail"] == "Invalid or missing agent token."
     assert log_response.json()["detail"] == "Invalid or missing agent token."
+    assert heartbeat_response.json()["detail"] == "Invalid or missing agent token."
 
 
 def test_mock_analysis_returns_a_normalized_decision(

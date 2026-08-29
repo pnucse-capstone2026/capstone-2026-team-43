@@ -487,6 +487,22 @@ def test_log_create_detail_and_database_persistence(
     assert stored == ("event-create-001", "BLOCKED", 0.91, "koelectra-dlp-v7")
 
 
+def test_log_event_id_is_required(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    temp_db_path: Path,
+) -> None:
+    payload = make_log_payload("will-be-removed")
+    payload.pop("event_id")
+
+    response = client.post("/api/v1/logs", json=payload, headers=agent_headers)
+
+    assert response.status_code == 422
+    assert any(item["loc"][-1] == "event_id" for item in response.json()["detail"])
+    with sqlite3.connect(temp_db_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM dlp_logs").fetchone()[0] == 0
+
+
 def test_log_model_version_is_optional(
     client: TestClient,
     agent_headers: dict[str, str],

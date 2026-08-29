@@ -85,7 +85,7 @@ app = FastAPI(
 class LogCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    event_id: str | None = Field(default=None, min_length=1, max_length=120)
+    event_id: str = Field(..., min_length=1, max_length=120)
     agent_id: str | None = Field(default=None, min_length=1, max_length=100)
     timestamp: datetime
     host_ip: str = Field(..., min_length=7, max_length=45)
@@ -653,21 +653,20 @@ def create_log(
 
     with closing(get_connection()) as connection:
         cursor = connection.cursor()
-        if payload.event_id:
-            existing_log = cursor.execute(
-                "SELECT log_id FROM dlp_logs WHERE event_id = ?",
-                (payload.event_id,),
-            ).fetchone()
-            if existing_log is not None:
-                return JSONResponse(
-                    status_code=200,
-                    content={
-                        "message": "Log already exists.",
-                        "log_id": existing_log["log_id"],
-                        "event_id": payload.event_id,
-                        "duplicate": True,
-                    },
-                )
+        existing_log = cursor.execute(
+            "SELECT log_id FROM dlp_logs WHERE event_id = ?",
+            (payload.event_id,),
+        ).fetchone()
+        if existing_log is not None:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "message": "Log already exists.",
+                    "log_id": existing_log["log_id"],
+                    "event_id": payload.event_id,
+                    "duplicate": True,
+                },
+            )
 
         try:
             cursor.execute(
@@ -705,9 +704,6 @@ def create_log(
                 ),
             )
         except sqlite3.IntegrityError:
-            if not payload.event_id:
-                raise
-
             existing_log = cursor.execute(
                 "SELECT log_id FROM dlp_logs WHERE event_id = ?",
                 (payload.event_id,),

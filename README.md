@@ -181,7 +181,7 @@ logging:
 
 - 요청 헤더: `X-Agent-Token: <AGENT_API_TOKEN>`
 - `timestamp`: UTC offset을 포함한 ISO 8601 형식 필수
-- `event_id`: Agent 재전송 중복 방지를 위해 신규 연동에서는 항상 포함 권장
+- `event_id`: AI 요청부터 Web 저장까지 같은 이벤트를 증명하는 필수 ID
 - `ai_score`: `0.0` 이상 `1.0` 이하
 - `action_taken`: `BLOCKED`, `WARNED`, `ALLOWED`
 - `leak_channel`: `USB_COPY`, `WEB_UPLOAD`, `EMAIL_ATTACHMENT`, `PRINT`, `MESSENGER`, `CLIPBOARD`, `CLOUD_DRIVE`
@@ -200,7 +200,7 @@ Host Agent는 `POST /api/v1/logs`로 탐지 결과를 전송합니다. 요청 �
 
 | 필드 | JSON 타입 | 필수 여부 | 제약 및 설명 |
 | --- | --- | --- | --- |
-| `event_id` | string | 연동 시 필수 권장 | 최대 120자. Agent 재전송 중복 방지 키 |
+| `event_id` | string | 필수 | 1~120자. AI 요청과 동일한 Agent 이벤트 ID이며 재전송 중복 방지 키 |
 | `agent_id` | string | 선택 | 최대 100자. 이벤트를 전송한 Host Agent 식별자 |
 | `timestamp` | string | 필수 | UTC offset을 포함한 ISO 8601 발생 시각 |
 | `host_ip` | string | 필수 | 7~45자. 이벤트 발생 Host IP |

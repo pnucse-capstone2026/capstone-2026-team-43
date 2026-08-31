@@ -18,6 +18,7 @@ import ctypes.wintypes
 import logging
 import pathlib
 import threading
+import time
 from typing import Any, Callable, Optional
 
 import win32api
@@ -171,20 +172,26 @@ class ClipboardHook:
         except Exception:
             return None
 
-    def _extract_file_texts(self) -> Optional[str]:
-        """클립보드에 CF_HDROP(파일 목록)이 있으면 각 파일 내용을 추출해 반환."""
+    def _extract_file_texts(self) -> tuple[Optional[str], float]:
+        """클립보드에 CF_HDROP(파일 목록)이 있으면 각 파일 내용을 추출해 반환.
+
+        Returns
+        -------
+        (extracted_text | None, t_extract_ms)
+        """
         if not self._file_inspector:
-            return None
+            return None, 0.0
         try:
             win32clipboard.OpenClipboard()
             try:
                 if not win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP):
-                    return None
+                    return None, 0.0
                 file_paths = win32clipboard.GetClipboardData(win32con.CF_HDROP)
             finally:
                 win32clipboard.CloseClipboard()
 
             parts: list[str] = []
+            t0 = time.perf_counter()
             for fp in file_paths:
                 try:
                     text = self._file_inspector.extract_from_path(pathlib.Path(fp))
@@ -194,10 +201,11 @@ class ClipboardHook:
                         logger.info("CF_HDROP 파일 내용 추출: %s (%d chars)", fname, len(text))
                 except Exception as exc:
                     logger.debug("CF_HDROP 파일 추출 실패 %s: %s", fp, exc)
-            return "\n\n".join(parts) if parts else None
+            t_extract_ms = (time.perf_counter() - t0) * 1000
+            return ("\n\n".join(parts) if parts else None), t_extract_ms
         except Exception as exc:
             logger.debug("CF_HDROP 처리 실패: %s", exc)
-            return None
+            return None, 0.0
 
     def release_paste(self, original_text: str) -> None:
         """AI가 허용 판정을 내렸을 때 클립보드를 복원하고 Ctrl+V를 재발행한다.
@@ -268,15 +276,15 @@ class ClipboardHook:
         text = TextExtractor.extract()
         normalized = TextExtractor.normalize(text) if text else ""
 
-        # 2) 파일 클립보드(CF_HDROP) — 파일 내용 추출
-        file_text = self._extract_file_texts()
+        # 2) 파일 클립보드(CF_HDROP) — 파일 내용 추출 + 시간 측정
+        file_text, t_extract_ms = self._extract_file_texts()
         if file_text:
             normalized = (normalized + "\n\n" + file_text).strip() if normalized else file_text
 
         if not normalized:
             return False
 
-        return self._on_text_pasted(normalized, process_name)
+        return self._on_text_pasted(normalized, process_name, t_extract_ms)
 
     def _keyboard_hook_proc(
         self, n_code: int, w_param: int, l_param: int

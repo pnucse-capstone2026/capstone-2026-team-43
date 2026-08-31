@@ -58,9 +58,11 @@ def load_channel_policy() -> dict[str, Any]:
 
 def setup_logging(level: str) -> None:
     logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
+        level=logging.WARNING,   # TODO(bench): 나머지 로그 임시 억제 — 벤치 후 원복
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # bench 타이밍 로그만 INFO 이상 출력
+    logging.getLogger("bench").setLevel(logging.INFO)
 
 
 # ── 공통 빌더 ──────────────────────────────────────────────────────────────────
@@ -131,9 +133,13 @@ def make_block_handler(
         text: str,
         hits: list[dict[str, Any]],
         process_name: str,
+        t_regex_ms: float = 0.0,
     ) -> None:
         payload = payload_builder.build(text, hits, channel, process_name)
+
+        # ②③④ AI 전송·처리·수신 시간 (api_client 내부에서 측정)
         result  = api_client.analyze(payload)
+        result.bench.t_regex_ms = round(t_regex_ms, 2)
 
         logger.info(
             "[%s] AI 판단: action=%s confidence=%.2f reason=%s",
@@ -146,10 +152,17 @@ def make_block_handler(
             "reason":          result.reason,
             "latency_ms":      int(result.latency_ms),
             "detection_type":  "RULE_BASED" if api_client.is_mock else "HYBRID",
+            "bench":           result.bench.to_dict(),
         }
 
         if result.should_block:
+            # ⑤ 차단 실행 시간 측정
+            t_block0 = time.perf_counter()
             notify_blocked(process_name, hits)
+            result.bench.t_block_ms = round((time.perf_counter() - t_block0) * 1000, 2)
+            _extra["bench"] = result.bench.to_dict()
+
+            result.bench.log_summary(channel)
             event_logger.log(
                 channel=channel,
                 action="blocked",
@@ -159,6 +172,7 @@ def make_block_handler(
                 extra=_extra,
             )
         elif result.needs_review:
+            result.bench.log_summary(channel)
             event_logger.log(
                 channel=channel,
                 action="review",
@@ -189,20 +203,29 @@ def build_clipboard_hook(
     # hook_ref: ClipboardHook 객체를 생성 후 바인딩 (순환 참조 없이 콜백에 전달)
     hook_ref: list[Any] = [None]
 
-    def on_text_pasted(text: str, process_name: str) -> bool:
+    def on_text_pasted(text: str, process_name: str, t_extract_ms: float = 0.0) -> bool:
         """True 반환 시 붙여넣기 차단.
 
         정규식 히트 즉시 차단 → AI 비동기 분석 →
           block/review : 팝업 + 로그 (차단 유지)
           allow        : 클립보드 복원 후 Ctrl+V 재발행 (오탐 복구)
         """
+        # ① 정규식 검증 시간 측정
+        t_regex0 = time.perf_counter()
         hits = rule_filter.match(text)
+        t_regex_ms = (time.perf_counter() - t_regex0) * 1000
+
         if not hits:
             return False
 
         def _ai_then_notify() -> None:
             payload = payload_builder.build(text, hits, "clipboard", process_name)
+
+            # ②③④ AI 전송·처리·수신 시간 (api_client 내부에서 측정)
             result  = api_client.analyze(payload)
+
+            result.bench.t_extract_ms = round(t_extract_ms, 2)
+            result.bench.t_regex_ms   = round(t_regex_ms, 2)
 
             logger.info(
                 "[clipboard] AI 판단: action=%s confidence=%.2f reason=%s",
@@ -215,10 +238,17 @@ def build_clipboard_hook(
                 "reason":         result.reason,
                 "latency_ms":     int(result.latency_ms),
                 "detection_type": "RULE_BASED" if api_client.is_mock else "HYBRID",
+                "bench":          result.bench.to_dict(),
             }
 
             if result.should_block:
+                # ⑤ 차단 실행 시간 측정
+                t_block0 = time.perf_counter()
                 notify_blocked(process_name, hits)
+                result.bench.t_block_ms = round((time.perf_counter() - t_block0) * 1000, 2)
+                _extra["bench"] = result.bench.to_dict()
+
+                result.bench.log_summary("clipboard")
                 event_logger.log(
                     channel="clipboard",
                     action="blocked",
@@ -228,7 +258,12 @@ def build_clipboard_hook(
                     extra=_extra,
                 )
             elif result.needs_review:
+                t_block0 = time.perf_counter()
                 notify_blocked(process_name, hits)
+                result.bench.t_block_ms = round((time.perf_counter() - t_block0) * 1000, 2)
+                _extra["bench"] = result.bench.to_dict()
+
+                result.bench.log_summary("clipboard")
                 event_logger.log(
                     channel="clipboard",
                     action="review",
@@ -240,6 +275,7 @@ def build_clipboard_hook(
                 logger.warning("[clipboard] review — 붙여넣기 차단 유지")
             else:
                 # AI 허용 → 정규식 오탐. 클립보드 복원 후 붙여넣기 재발행.
+                result.bench.log_summary("clipboard")
                 logger.info("[clipboard] AI allow — 오탐 복구: 붙여넣기 재발행")
                 hook = hook_ref[0]
                 if hook is not None:

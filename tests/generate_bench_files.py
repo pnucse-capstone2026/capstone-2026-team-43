@@ -9,14 +9,14 @@ Office(4)     : docx xlsx pptx pdf
 한글/압축(2)  : hwpx zip
 
 크기 구간(5)  : 10kb / 100kb / 1mb / 10mb / 50mb
-  * Office·hwpx는 50mb 제외 (생성 실용성)
   * zip은 내부 txt 파일 크기로 구간 맞춤
 
 실행
 ----
-  python tests/generate_bench_files.py          # 생성 + 벤치마크
-  python tests/generate_bench_files.py --gen    # 생성만
-  python tests/generate_bench_files.py --bench  # 벤치마크만
+  python tests/generate_bench_files.py              # 전체 생성 + 벤치마크
+  python tests/generate_bench_files.py --gen        # 생성만
+  python tests/generate_bench_files.py --gen --tier 50mb   # 50mb 구간만
+  python tests/generate_bench_files.py --bench    # 벤치마크만
 """
 
 from __future__ import annotations
@@ -103,23 +103,27 @@ def gen_csv(path: pathlib.Path, size: int, **_):
         i += 1
     _write_text(path, "이름,주민번호,전화,이메일,계좌\n" + "".join(rows))
 
+_LARGE_BYTES = 10 * 1024**2   # 이 이상이면 대용량 생성 경로 사용
+
+
 def gen_docx(path: pathlib.Path, size: int, **_):
     import docx as dx
     doc = dx.Document()
     doc.add_heading("내부 문서 (대외비)", level=1)
     text = _text(size)
-    for i in range(0, len(text), 4000):
-        doc.add_paragraph(text[i:i+4000])
+    chunk = 8000 if size > _LARGE_BYTES else 4000
+    for i in range(0, len(text), chunk):
+        doc.add_paragraph(text[i:i + chunk])
     doc.save(path)
 
 def gen_pdf(path: pathlib.Path, size: int, **_):
     import fitz
     doc  = fitz.open()
     text = _text(size)
-    cpp  = 2800  # chars per page
+    cpp  = 12000 if size > _LARGE_BYTES else 2800
     for i in range(0, len(text), cpp):
         page = doc.new_page(width=595, height=842)
-        page.insert_text((40, 40), text[i:i+cpp], fontsize=9)
+        page.insert_text((40, 40), text[i:i + cpp], fontsize=9)
     doc.save(path)
 
 def gen_xlsx(path: pathlib.Path, size: int, **_):
@@ -129,20 +133,27 @@ def gen_xlsx(path: pathlib.Path, size: int, **_):
     ws.append(["이름", "주민번호", "전화", "이메일", "계좌"])
     sens = ["홍길동", "900123-1234567", "010-9876-5432", "hong@company.com", "110-123-456789"]
     frow = ["일반직원", "일반부서", "팀원", "2020-01-01", "서울"]
-    rows = max(10, size // 80)
-    for i in range(rows):
-        ws.append(sens if i % 10 == 0 else frow)
+    if size <= _LARGE_BYTES:
+        rows = max(10, size // 80)
+        for i in range(rows):
+            ws.append(sens if i % 10 == 0 else frow)
+    else:
+        body = _text(size)
+        chunk = 8000
+        for i in range(0, len(body), chunk):
+            part = body[i:i + chunk]
+            ws.append((sens if (i // chunk) % 10 == 0 else frow) + [part])
     wb.save(path)
 
 def gen_pptx(path: pathlib.Path, size: int, **_):
     from pptx import Presentation
     prs   = Presentation()
     text  = _text(size)
-    cpslide = 800
+    cpslide = 50000 if size > _LARGE_BYTES else 800
     for i in range(0, len(text), cpslide):
         slide = prs.slides.add_slide(prs.slide_layouts[1])
-        slide.shapes.title.text = f"슬라이드 {i//cpslide+1}"
-        slide.placeholders[1].text = text[i:i+cpslide]
+        slide.shapes.title.text = f"슬라이드 {i // cpslide + 1}"
+        slide.placeholders[1].text = text[i:i + cpslide]
     prs.save(path)
 
 def gen_hwpx(path: pathlib.Path, size: int, **_):
@@ -205,13 +216,13 @@ FORMATS: list[tuple[str, any, int | None]] = [
     (".bat",  gen_text,  None),
     (".ps1",  gen_text,  None),
     (".env",  gen_text,  None),
-    # Office — 최대 10mb
-    (".docx", gen_docx,  3),
-    (".xlsx", gen_xlsx,  3),
-    (".pptx", gen_pptx,  3),
-    (".pdf",  gen_pdf,   3),
-    # 한글/압축 — 최대 10mb
-    (".hwpx", gen_hwpx,  3),
+    # Office / 한글 — 전 구간
+    (".docx", gen_docx,  None),
+    (".xlsx", gen_xlsx,  None),
+    (".pptx", gen_pptx,  None),
+    (".pdf",  gen_pdf,   None),
+    # 한글/압축
+    (".hwpx", gen_hwpx,  None),
     (".zip",  gen_zip,   None),
 ]
 
@@ -226,12 +237,19 @@ TIERS: list[tuple[str, int]] = [
 
 # ── 생성 ────────────────────────────────────────────────────────────────────
 
-def generate_all():
+def generate_all(tier_filter: str | None = None):
     print("=== 더미 파일 생성 ===\n")
     total_files = 0
     total_bytes = 0
 
+    tiers = TIERS if tier_filter is None else [t for t in TIERS if t[0] == tier_filter]
+    if tier_filter and not tiers:
+        print(f"[!] Unknown tier: {tier_filter}")
+        return
+
     for tier_idx, (tier_name, size) in enumerate(TIERS):
+        if tier_filter and tier_name != tier_filter:
+            continue
         tier_dir = BENCH_DIR / tier_name
         tier_dir.mkdir(parents=True, exist_ok=True)
         created = 0
@@ -329,8 +347,18 @@ def benchmark_all():
 
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "--all"
+    args = sys.argv[1:]
+    tier_filter = None
+    if "--tier" in args:
+        idx = args.index("--tier")
+        if idx + 1 >= len(args):
+            print("Usage: --tier 50mb")
+            sys.exit(1)
+        tier_filter = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
+
+    mode = args[0] if args else "--all"
     if mode in ("--gen", "--all"):
-        generate_all()
+        generate_all(tier_filter)
     if mode in ("--bench", "--all"):
         benchmark_all()

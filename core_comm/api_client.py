@@ -16,11 +16,12 @@ Mock 판단 기준 (AI 서버 confidence_score 스케일 0-1 기준)
 """
 
 import logging
+import time
 from typing import Any
 
 import requests
 
-from core_comm.payload_builder import AnalysisPayload, AnalysisResult, ResponseParser
+from core_comm.payload_builder import AnalysisPayload, AnalysisResult, BenchTimings, ResponseParser
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,9 @@ class ApiClient:
     def analyze(self, payload: AnalysisPayload) -> AnalysisResult:
         """페이로드를 분석하고 결과를 반환한다. mock 모드면 즉시 반환."""
         if self._mock:
+            t0 = time.perf_counter()
             result = _mock_result(payload)
+            result.bench.t_ai_ms = (time.perf_counter() - t0) * 1000
             logger.debug(
                 "Mock 분석 결과: action=%s confidence=%.2f reason=%s",
                 result.action, result.confidence_score, result.reason,
@@ -107,13 +110,27 @@ class ApiClient:
         logger.debug("AI 서버 요청 → %s (event_id=%s)", url, payload.request_id)
 
         try:
+            t0 = time.perf_counter()
             resp = requests.post(
                 url,
                 json=payload.to_dict(),   # AgentRequest 포맷
                 timeout=self._timeout,
             )
+            t_roundtrip_ms = (time.perf_counter() - t0) * 1000
             resp.raise_for_status()
-            return ResponseParser.parse(resp.json(), payload.request_id)
+
+            result = ResponseParser.parse(resp.json(), payload.request_id)
+
+            # 서버가 보고한 처리 시간을 기준으로 네트워크 시간을 분리
+            # send ≈ recv ≈ (왕복 - AI처리) / 2  (대칭 가정)
+            t_ai  = max(0.0, result.latency_ms)
+            t_net = max(0.0, t_roundtrip_ms - t_ai)
+            result.bench.t_roundtrip_ms = round(t_roundtrip_ms, 2)
+            result.bench.t_send_ms      = round(t_net / 2, 2)
+            result.bench.t_ai_ms        = round(t_ai, 2)
+            result.bench.t_recv_ms      = round(t_net / 2, 2)
+            return result
+
         except requests.Timeout:
             logger.error("AI 서버 타임아웃 (%.1fs) — 보수적으로 block 처리", self._timeout)
             return AnalysisResult(

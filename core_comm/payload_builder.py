@@ -33,13 +33,17 @@ AI 서버 응답 포맷 (AgentResponse)
 """
 
 import hashlib
+import logging
 import os
 import re
 import socket
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+_bench_logger = logging.getLogger("bench")
 
 _HOSTNAME = socket.gethostname()
 
@@ -50,6 +54,64 @@ DEFAULT_CONTEXT_CHARS = 200
 
 # 0 이하면 제한 없음 (전체 텍스트 전송 — 하위 호환용)
 DEFAULT_MAX_TEXT_CHARS = 0
+
+
+@dataclass
+class BenchTimings:
+    """6구간 레이턴시 기록.
+
+    구간 정의
+    ---------
+    0. t_extract_ms   : 파일 텍스트 추출 (FileInspector) — 확장자/크기에 따라 가장 크게 변함
+    1. t_regex_ms     : 정규식 검증 (호스트)
+    2. t_send_ms      : Host → AI 서버 전송 (네트워크 아웃바운드, 왕복-AI처리 / 2 추정)
+    3. t_ai_ms        : AI 서버 내부 처리 (서버 자기 보고 latency_ms)
+    4. t_recv_ms      : AI → Host 수신 (네트워크 인바운드, 왕복-AI처리 / 2 추정)
+    5. t_block_ms     : 최종 차단 실행 (팝업 · HTTP 451 응답 등)
+
+    t_roundtrip_ms    : 실제 측정한 전체 HTTP 왕복 시간 (send+ai+recv)
+    """
+    t_extract_ms:   float = 0.0   # ★ 파일 추출 (확장자별 차이 최대)
+    t_regex_ms:     float = 0.0
+    t_send_ms:      float = 0.0
+    t_ai_ms:        float = 0.0
+    t_recv_ms:      float = 0.0
+    t_block_ms:     float = 0.0
+    t_roundtrip_ms: float = 0.0   # 실측 왕복 (2+3+4)
+
+    @property
+    def t_total_ms(self) -> float:
+        """추출 + 정규식 + 왕복 + 차단 합계."""
+        return round(
+            self.t_extract_ms + self.t_regex_ms + self.t_roundtrip_ms + self.t_block_ms,
+            2,
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "t_extract_ms":   round(self.t_extract_ms, 2),
+            "t_regex_ms":     round(self.t_regex_ms, 2),
+            "t_send_ms":      round(self.t_send_ms, 2),
+            "t_ai_ms":        round(self.t_ai_ms, 2),
+            "t_recv_ms":      round(self.t_recv_ms, 2),
+            "t_block_ms":     round(self.t_block_ms, 2),
+            "t_roundtrip_ms": round(self.t_roundtrip_ms, 2),
+            "t_total_ms":     self.t_total_ms,
+        }
+
+    def log_summary(self, channel: str) -> None:
+        _bench_logger.info(
+            "[%s] ⓪ extract=%.2fms  ① regex=%.2fms  ② send≈%.2fms"
+            "  ③ ai=%.2fms  ④ recv≈%.2fms  ⑤ block=%.2fms  | 합계=%.2fms",
+            channel,
+            self.t_extract_ms,
+            self.t_regex_ms,
+            self.t_send_ms,
+            self.t_ai_ms,
+            self.t_recv_ms,
+            self.t_block_ms,
+            self.t_total_ms,
+        )
 
 
 @dataclass
@@ -102,6 +164,7 @@ class AnalysisResult:
     reason: str = ""
     model_version: str = ""
     latency_ms: float = 0.0
+    bench: BenchTimings = field(default_factory=BenchTimings)
 
     @property
     def risk_score(self) -> float:

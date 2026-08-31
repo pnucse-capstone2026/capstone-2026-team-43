@@ -333,6 +333,7 @@ class _DLPAddon:
             logger.info("[WebProxy]    body preview: %s", preview)
 
     def _handle(self, flow) -> None:
+        import time as _time
         from mitmproxy.http import Response  # 지연 임포트 — 서비스 시 유효
 
         channel = self._get_dlp_channel(flow)
@@ -351,7 +352,11 @@ class _DLPAddon:
         if self._log_traffic:
             self._log_send(flow)
 
+        # ⓪ 텍스트 추출 시간 측정
+        t_extract0 = _time.perf_counter()
         text = self._extract_text(flow)
+        t_extract_ms = (_time.perf_counter() - t_extract0) * 1000
+
         if not text or not text.strip():
             if self._log_traffic:
                 logger.info(
@@ -360,7 +365,11 @@ class _DLPAddon:
                 )
             return
 
+        # ① 정규식 검증 시간 측정
+        t_regex0 = _time.perf_counter()
         hits = self._rule_filter.match(text)
+        t_regex_ms = (_time.perf_counter() - t_regex0) * 1000
+
         if not hits:
             if self._log_traffic:
                 logger.info(
@@ -381,7 +390,11 @@ class _DLPAddon:
         host = flow.request.pretty_host.lower()
         process_name = f"browser@{host}"
         payload = self._builder.build(text, hits, channel, process_name)
+
+        # ②③④ AI 전송·처리·수신 시간 (api_client 내부에서 측정)
         result  = self._api.analyze(payload)
+        result.bench.t_extract_ms = round(t_extract_ms, 2)
+        result.bench.t_regex_ms   = round(t_regex_ms, 2)
 
         logger.info(
             "[WebProxy] AI 판단: action=%s confidence=%.2f url=%s",
@@ -395,9 +408,13 @@ class _DLPAddon:
             "reason":         result.reason,
             "latency_ms":     int(result.latency_ms),
             "detection_type": "RULE_BASED" if getattr(self._api, "is_mock", True) else "HYBRID",
+            "bench":          result.bench.to_dict(),
         }
 
         if result.should_block:
+            # ⑤ 차단 실행 시간 측정 (HTTP 451 응답 + 팝업)
+            t_block0 = _time.perf_counter()
+
             self._event_logger.log(
                 channel=channel,
                 action="blocked",
@@ -408,8 +425,6 @@ class _DLPAddon:
             )
             # 같은 호스트 60초 내 팝업 1회만 (재시도/동시다발 차단 팝업 폭탄 방지)
             if self._on_blocked:
-                import time as _time
-                host = flow.request.pretty_host.lower()
                 now = _time.monotonic()
                 last = self._popup_cache.get(host, 0)
                 if now - last > self._POPUP_DEDUP_SEC:
@@ -432,9 +447,13 @@ class _DLPAddon:
                     "Cache-Control": "no-store",
                 },
             )
+            result.bench.t_block_ms = round((_time.perf_counter() - t_block0) * 1000, 2)
+            _extra["bench"] = result.bench.to_dict()
+            result.bench.log_summary(channel)
             return
 
         if result.needs_review:
+            result.bench.log_summary(channel)
             self._event_logger.log(
                 channel=channel,
                 action="review",

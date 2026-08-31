@@ -300,9 +300,11 @@ class UsbGuardUserMode:
 
         logger.info("[UsbGuard] 검사: %s (%d bytes)", file_path, file_size)
 
-        # 텍스트 추출 (FileInspector는 Path 객체 필요)
+        # ⓪ 텍스트 추출 시간 측정 (확장자/크기에 따라 가장 크게 변함)
         try:
+            t_extract0 = time.perf_counter()
             text = self._fi.extract_from_path(Path(file_path))
+            t_extract_ms = (time.perf_counter() - t_extract0) * 1000
         except Exception as exc:
             logger.debug("[UsbGuard] 텍스트 추출 실패 %s: %s", file_path, exc)
             return
@@ -310,8 +312,11 @@ class UsbGuardUserMode:
         if not text or len(text.strip()) < _MIN_TEXT_LEN:
             return
 
-        # 정규식 DLP 검사
+        # ① 정규식 검증 시간 측정
+        t_regex0 = time.perf_counter()
         hits = self._rf.match(text)
+        t_regex_ms = (time.perf_counter() - t_regex0) * 1000
+
         if not hits:
             logger.debug("[UsbGuard] ALLOW (no hits): %s", file_path)
             return
@@ -319,7 +324,7 @@ class UsbGuardUserMode:
         hit_ids = [h["id"] for h in hits]
         logger.warning("[UsbGuard] 민감 정보 탐지: %s  hits=%s", file_path, hit_ids)
 
-        # AI 판단 (mock 또는 실제)
+        # ②③④ AI 판단 (mock 또는 실제) — api_client 내부에서 타이밍 측정
         payload = None
         result  = None
         try:
@@ -330,10 +335,34 @@ class UsbGuardUserMode:
                 process_name=f"usb_copy@{drive}",
             )
             result = self._ac.analyze(payload)
+            result.bench.t_extract_ms = round(t_extract_ms, 2)
+            result.bench.t_regex_ms   = round(t_regex_ms, 2)
             action = result.action
         except Exception as exc:
             logger.warning("[UsbGuard] AI 판단 실패 → block: %s", exc)
             action = "block"
+
+        bench_dict = result.bench.to_dict() if result else {}
+
+        # ⑤ 차단 실행 시간 측정 (파일 삭제)
+        t_block0 = time.perf_counter()
+        if action == "block":
+            try:
+                os.remove(file_path)
+                logger.warning("[UsbGuard] 삭제 완료: %s", file_path)
+            except OSError as exc:
+                logger.error("[UsbGuard] 삭제 실패 %s: %s", file_path, exc)
+            if self._on_blocked:
+                try:
+                    self._on_blocked(file_path, hits)
+                except Exception:
+                    pass
+        t_block_ms = (time.perf_counter() - t_block0) * 1000
+
+        if result:
+            result.bench.t_block_ms = round(t_block_ms, 2)
+            bench_dict = result.bench.to_dict()
+            result.bench.log_summary("file_guard")
 
         # 이벤트 로그
         self._el.log(
@@ -351,27 +380,13 @@ class UsbGuardUserMode:
                 "file_path":      file_path,
                 "file_size":      file_size,
                 "drive":          drive,
+                "bench":          bench_dict,
             },
         )
 
         logger.info("[UsbGuard] AI 판단: action=%s  file=%s", action, file_path)
 
-        if action == "block":
-            # USB에서 민감 파일 삭제
-            try:
-                os.remove(file_path)
-                logger.warning("[UsbGuard] 삭제 완료: %s", file_path)
-            except OSError as exc:
-                logger.error("[UsbGuard] 삭제 실패 %s: %s", file_path, exc)
-
-            # 사용자 알림
-            if self._on_blocked:
-                try:
-                    self._on_blocked(file_path, hits)
-                except Exception:
-                    pass
-
-        elif action == "review":
+        if action == "review":
             logger.warning("[UsbGuard] review 기록 — 파일 허용: %s", file_path)
 
 

@@ -197,35 +197,6 @@
             letter-spacing: -0.04em;
         }
 
-        .topbar-meta {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-            justify-content: flex-end;
-        }
-
-        .status-pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 10px 13px;
-            border-radius: 999px;
-            background: rgba(255, 255, 255, 0.78);
-            border: 1px solid var(--line);
-            color: var(--muted);
-            font-size: 12px;
-            font-weight: 800;
-            box-shadow: var(--shadow-soft);
-        }
-
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 999px;
-            background: var(--ok);
-            box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.12);
-        }
-
         .page {
             display: none;
         }
@@ -782,18 +753,6 @@
             font-weight: 900;
         }
 
-        .status-button {
-            appearance: none;
-            cursor: pointer;
-            font: inherit;
-        }
-
-        .status-button[aria-pressed="true"] {
-            color: var(--blue);
-            border-color: rgba(37, 99, 235, 0.34);
-            background: var(--blue-soft);
-        }
-
         .realtime-risk-alert {
             position: fixed;
             top: 22px;
@@ -1000,10 +959,6 @@
                 align-items: flex-start;
             }
 
-            .topbar-meta {
-                justify-content: flex-start;
-            }
-
             .hero-main,
             .priority-card,
             .card,
@@ -1103,18 +1058,6 @@
                 <div>
                     <div class="page-eyebrow" id="pageEyebrow">Dashboard</div>
                     <h1 id="pageTitle">민감정보 파일 반출 탐지 현황</h1>
-                </div>
-                <div class="topbar-meta">
-                    <span class="status-pill"><span class="status-dot"></span> API <strong id="apiStatus">확인 중</strong></span>
-                    <span class="status-pill">Web 분석 <strong id="analysisMode">확인 중</strong></span>
-                    <span class="status-pill" title="Agent 프로세스 heartbeat 생존 상태이며 채널 정상 여부를 의미하지 않습니다.">
-                        Agent 프로세스 <strong id="agentProcessStatus" aria-live="polite">확인 중</strong>
-                    </span>
-                    <span class="status-pill">최근 조회 <strong id="lastUpdated">-</strong></span>
-                    <span class="status-pill">최다 채널 <strong id="topChannel">-</strong></span>
-                    <button class="status-pill status-button" id="alertSoundToggle" type="button" aria-pressed="false">
-                        경고음 <strong id="alertSoundStatus">끔</strong>
-                    </button>
                 </div>
             </header>
 
@@ -1295,7 +1238,6 @@
     <script>
         const LOGS_PER_PAGE = 10;
         const RISK_POLL_INTERVAL_MS = 2000;
-        const AGENT_STATUS_POLL_INTERVAL_MS = 30000;
         const RISK_POLL_TIMEOUT_MS = 5000;
         const RISK_POLL_MAX_BACKOFF_MS = 30000;
         const RISK_ALERT_VISIBLE_MS = 12000;
@@ -1314,10 +1256,7 @@
         let riskPollController = null;
         let riskPollFailureCount = 0;
         let riskPollGeneration = 0;
-        let agentStatusPollTimer = null;
-        let agentStatusPollGeneration = 0;
         let riskAlertHideTimer = null;
-        let alertSoundEnabled = false;
         let alertAudioContext = null;
         let dashboardSummaryRequestGeneration = 0;
         let dashboardSummaryRenderGeneration = 0;
@@ -1422,11 +1361,9 @@
         }
 
         function renderDashboardSummary(summary) {
-            setText("lastUpdated", new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }));
             setText("totalEvents", summary.kpis.total_events);
             setText("avgScore", Number(summary.kpis.average_score).toFixed(2));
             setText("topDepartment", summary.top_departments[0]?.department || "-");
-            setText("topChannel", summary.channel_breakdown[0]?.channel || "-");
             setText("blockedPriority", `${summary.kpis.blocked_count}건`);
             setText("warnedPriority", `${summary.kpis.warned_count}건`);
             setText("allowedPriority", `${summary.kpis.allowed_count}건`);
@@ -1487,8 +1424,9 @@
             riskAlertHideTimer = window.setTimeout(hideRealtimeRiskAlert, RISK_ALERT_VISIBLE_MS);
         }
 
-        function playRiskAlertTone() {
-            if (!alertSoundEnabled || !alertAudioContext) return;
+        async function playRiskAlertTone() {
+            await enableAlertSound();
+            if (!alertAudioContext || alertAudioContext.state !== "running") return;
 
             const now = alertAudioContext.currentTime;
             const oscillator = alertAudioContext.createOscillator();
@@ -1505,34 +1443,21 @@
             oscillator.stop(now + 0.38);
         }
 
-        async function toggleAlertSound() {
+        async function enableAlertSound() {
             const AudioContextClass = window.AudioContext || window.webkitAudioContext;
             if (!AudioContextClass) {
-                setText("alertSoundStatus", "미지원");
-                document.getElementById("alertSoundToggle").disabled = true;
+                console.warn("이 브라우저는 경고음을 지원하지 않습니다.");
                 return;
             }
 
-            const shouldEnable = !alertSoundEnabled;
             try {
-                if (shouldEnable) {
-                    alertAudioContext ||= new AudioContextClass();
-                    if (alertAudioContext.state === "suspended") {
-                        await alertAudioContext.resume();
-                    }
+                alertAudioContext ||= new AudioContextClass();
+                if (alertAudioContext.state === "suspended") {
+                    await alertAudioContext.resume();
                 }
             } catch (error) {
-                alertSoundEnabled = false;
-                setText("alertSoundStatus", "사용 불가");
                 console.warn("경고음을 활성화하지 못했습니다.", error);
-                return;
             }
-
-            alertSoundEnabled = shouldEnable;
-            const toggle = document.getElementById("alertSoundToggle");
-            toggle.setAttribute("aria-pressed", String(alertSoundEnabled));
-            setText("alertSoundStatus", alertSoundEnabled ? "켬" : "끔");
-            if (alertSoundEnabled) playRiskAlertTone();
         }
 
         function showRealtimeRiskAlert(items) {
@@ -1575,7 +1500,7 @@
             const alertElement = document.getElementById("realtimeRiskAlert");
             alertElement.hidden = false;
             scheduleRealtimeRiskAlertHide();
-            playRiskAlertTone();
+            playRiskAlertTone().catch(error => console.warn("경고음 재생 실패", error));
         }
 
         function scheduleRiskPoll(delay, generation = riskPollGeneration) {
@@ -1683,78 +1608,6 @@
             stopRiskPolling();
             const generation = riskPollGeneration;
             scheduleRiskPoll(0, generation);
-        }
-
-        function renderAgentProcessStatus(result) {
-            const items = Array.isArray(result.items) ? result.items : [];
-            const count = Number(result.count);
-            const onlineCount = Number(result.online_count);
-            if (
-                !Number.isInteger(count) || count < 0
-                || !Number.isInteger(onlineCount) || onlineCount < 0 || onlineCount > count
-                || items.length !== count
-            ) {
-                throw new Error("Agent process status response is invalid.");
-            }
-            if (count === 0) {
-                setText("agentProcessStatus", "보고 없음");
-                return;
-            }
-
-            const versions = [...new Set(
-                items
-                    .map(item => String(item.agent_version || "").trim())
-                    .filter(Boolean)
-            )];
-            const visibleVersions = versions.slice(0, 2).join(", ");
-            const hiddenVersionCount = Math.max(0, versions.length - 2);
-            const versionText = visibleVersions
-                ? ` · ${visibleVersions}${hiddenVersionCount ? ` 외 ${hiddenVersionCount}` : ""}`
-                : "";
-            setText("agentProcessStatus", `${onlineCount}/${count} ONLINE${versionText}`);
-        }
-
-        function scheduleAgentStatusPoll(delay, generation = agentStatusPollGeneration) {
-            clearTimeout(agentStatusPollTimer);
-            agentStatusPollTimer = window.setTimeout(
-                () => pollAgentProcessStatus(generation),
-                delay
-            );
-        }
-
-        async function pollAgentProcessStatus(generation) {
-            if (generation !== agentStatusPollGeneration || document.hidden) return;
-            try {
-                const response = await fetch("/api/v1/agents", { cache: "no-store" });
-                if (!response.ok) {
-                    throw new Error(`Agent process status request failed: ${response.status}`);
-                }
-                const result = await response.json();
-                if (generation === agentStatusPollGeneration) {
-                    renderAgentProcessStatus(result);
-                }
-            } catch (error) {
-                if (generation === agentStatusPollGeneration) {
-                    setText("agentProcessStatus", "확인 실패");
-                    console.warn("Agent 프로세스 heartbeat 조회 실패", error);
-                }
-            } finally {
-                if (generation === agentStatusPollGeneration && !document.hidden) {
-                    scheduleAgentStatusPoll(AGENT_STATUS_POLL_INTERVAL_MS, generation);
-                }
-            }
-        }
-
-        function stopAgentStatusPolling() {
-            agentStatusPollGeneration += 1;
-            clearTimeout(agentStatusPollTimer);
-            agentStatusPollTimer = null;
-        }
-
-        function startAgentStatusPolling() {
-            stopAgentStatusPolling();
-            const generation = agentStatusPollGeneration;
-            scheduleAgentStatusPoll(0, generation);
         }
 
         function renderDepartmentRanking(items) {
@@ -2204,13 +2057,12 @@
         async function loadDashboard() {
             const summaryGeneration = ++dashboardSummaryRequestGeneration;
             try {
-                const [health, summary] = await Promise.all([
-                    fetch("/health").then(res => res.json()),
-                    fetch("/api/v1/dashboard/summary").then(res => res.json())
-                ]);
+                const summaryResponse = await fetch("/api/v1/dashboard/summary");
+                if (!summaryResponse.ok) {
+                    throw new Error(`Dashboard summary request failed: ${summaryResponse.status}`);
+                }
+                const summary = await summaryResponse.json();
 
-                setText("apiStatus", health.status.toUpperCase());
-                setText("analysisMode", String(health.analysis_mode || "unknown").toUpperCase());
                 if (summaryGeneration > dashboardSummaryRenderGeneration) {
                     dashboardSummaryRenderGeneration = summaryGeneration;
                     renderDashboardSummary(summary);
@@ -2223,8 +2075,6 @@
                     pendingLogId = null;
                 }
             } catch (error) {
-                setText("apiStatus", "ERROR");
-                setText("analysisMode", "ERROR");
                 setText("logMeta", "로그 정보를 불러오지 못했습니다.");
                 document.getElementById("logTableWrap").innerHTML =
                     '<div class="empty">API 연결에 실패했습니다. FastAPI 서버가 실행 중인지 확인해주세요.</div>';
@@ -2248,12 +2098,6 @@
             clearTimeout(window.logSearchTimer);
             window.logSearchTimer = setTimeout(() => loadLogs(1), 250);
         });
-        document.getElementById("alertSoundToggle").addEventListener("click", () => {
-            toggleAlertSound().catch(error => {
-                setText("alertSoundStatus", "오류");
-                console.warn("경고음 활성화 실패", error);
-            });
-        });
         document.getElementById("realtimeRiskClose").addEventListener("click", hideRealtimeRiskAlert);
         document.getElementById("realtimeRiskDismiss").addEventListener("click", hideRealtimeRiskAlert);
         document.getElementById("realtimeRiskAlert").addEventListener("mouseenter", () => {
@@ -2267,18 +2111,18 @@
         document.addEventListener("visibilitychange", () => {
             if (document.hidden) {
                 stopRiskPolling();
-                stopAgentStatusPolling();
             } else {
+                enableAlertSound();
                 startRiskPolling();
-                startAgentStatusPolling();
             }
         });
         window.addEventListener("pagehide", stopRiskPolling);
-        window.addEventListener("pagehide", stopAgentStatusPolling);
 
+        enableAlertSound();
+        document.addEventListener("click", enableAlertSound, { once: true });
+        document.addEventListener("keydown", enableAlertSound, { once: true });
         startRiskPolling();
         loadDashboard();
-        startAgentStatusPolling();
     </script>
 </body>
 </html>

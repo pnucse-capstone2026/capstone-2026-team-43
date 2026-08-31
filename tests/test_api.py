@@ -254,8 +254,6 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
         assert "AI 기반 Host DLP 시스템" in response.text
         assert 'value="CLIPBOARD"' in response.text
         assert 'value="CLOUD_DRIVE"' in response.text
-        assert 'id="analysisMode"' in response.text
-        assert "Web 분석" in response.text
         assert "AI 모델 버전" in response.text
 
 
@@ -572,13 +570,19 @@ def test_agent_heartbeat_rejects_unbounded_or_invalid_fields(
     assert any(item["loc"][-1] == field for item in response.json()["detail"])
 
 
-def test_frontend_polls_process_liveness_without_claiming_channel_health(
+def test_frontend_hides_header_status_controls_and_agent_polling(
     client: TestClient,
 ) -> None:
     html = client.get("/dashboard").text
 
-    for marker in (
+    for removed_marker in (
+        'class="topbar-meta"',
+        'id="apiStatus"',
+        'id="analysisMode"',
         'id="agentProcessStatus"',
+        'id="lastUpdated"',
+        'id="topChannel"',
+        'id="alertSoundToggle"',
         "Agent 프로세스 heartbeat 생존 상태이며 채널 정상 여부를 의미하지 않습니다.",
         "const AGENT_STATUS_POLL_INTERVAL_MS = 30000",
         'fetch("/api/v1/agents", { cache: "no-store" })',
@@ -586,11 +590,8 @@ def test_frontend_polls_process_liveness_without_claiming_channel_health(
         "function startAgentStatusPolling()",
         "function stopAgentStatusPolling()",
         "startAgentStatusPolling();",
-        'setText("agentProcessStatus", `${onlineCount}/${count} ONLINE${versionText}`)',
     ):
-        assert marker in html
-
-    assert "Agent 채널 정상" not in html
+        assert removed_marker not in html
 
 
 def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
@@ -599,9 +600,14 @@ def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
     for marker in (
         'id="realtimeRiskAlert"',
         'aria-live="assertive"',
-        'id="alertSoundToggle"',
         "const RISK_POLL_INTERVAL_MS = 2000",
         "function pollRealtimeRiskAlerts",
+        "async function enableAlertSound()",
+        "async function playRiskAlertTone()",
+        "await enableAlertSound();",
+        'playRiskAlertTone().catch(error => console.warn("경고음 재생 실패", error))',
+        'document.addEventListener("click", enableAlertSound, { once: true })',
+        'document.addEventListener("keydown", enableAlertSound, { once: true })',
         "async function refreshDashboardData()",
         "function createDashboardChart",
         'typeof window.Chart !== "function"',
@@ -615,16 +621,15 @@ def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
         "const cursorAdvanced = previousCursor !== null",
         "if (cursorAdvanced) {",
         "refreshDashboardData().catch",
-        'setText("analysisMode", String(health.analysis_mode || "unknown").toUpperCase())',
     ):
         assert marker in html
 
     assert "AI 0.85 이상" not in html
     assert "설정 임계값 이상" in html
     assert "setInterval(loadDashboard" not in html
+    assert "toggleAlertSound" not in html
+    assert "alertSoundEnabled" not in html
     assert html.index("if (cursorAdvanced) {") < html.index("if (items.length) {")
-    assert html.index("alertSoundEnabled = shouldEnable") > html.index("await alertAudioContext.resume()")
-    assert 'setText("alertSoundStatus", "사용 불가")' in html
     assert 'console.warn("경고음을 활성화하지 못했습니다.", error)' in html
 
 

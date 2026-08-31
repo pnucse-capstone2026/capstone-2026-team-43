@@ -11,7 +11,7 @@ Host Agent가 전송한 민감정보 반출 탐지 로그를 저장하고, 관�
 - 탐지 로그 검색, 필터, 목록 및 상세 조회
 - 최근 7일 KPI, 탐지 추이, 채널 분포, 부서별 탐지 건수 시각화
 - 고위험 이벤트와 Evidence 상세 분석
-- `log_id` 커서 기반 2초 주기 준실시간 위험 알림과 선택형 경고음
+- `log_id` 커서 기반 2초 주기 준실시간 위험 알림과 자동 활성화 경고음
 - Mock AI 분석 및 외부 AI 서버 전달 구조
 - 정책 조회·생성 API와 append-only 생성 감사 기록
 
@@ -130,7 +130,7 @@ python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --env-file .env
 python -m uvicorn backend.main:app --host <SERVER_LAN_IP> --port 8000 --env-file .env
 ```
 
-대시보드 PC에서는 `http://<SERVER_LAN_IP>:8000/dashboard`를 열고 `경고음 꺼` 버튼을 눌러 경고음을 켭니다. Host Agent PC의 `config/settings.yaml`은 다음 항목을 같은 서버로 맞춥니다.
+대시보드 PC에서는 `http://<SERVER_LAN_IP>:8000/dashboard`를 엽니다. 경고음은 항상 활성화를 시도하며, 브라우저 자동 재생 정책으로 대기 중이면 화면을 처음 클릭하거나 키를 누를 때 자동으로 해제됩니다. Host Agent PC의 `config/settings.yaml`은 다음 항목을 같은 서버로 맞춥니다.
 
 ```yaml
 server:
@@ -192,7 +192,7 @@ Host 통합 검증기가 저장 후 `GET /api/v1/logs`로 readback할 때도 인
 - `action_taken == BLOCKED`
 - `ai_score >= HIGH_RISK_SCORE_THRESHOLD` (기본값 `0.85`)
 
-신규 이벤트가 있으면 우측 상단에 빨간 위험 알림이 표시되고, `상세 로그 보기`로 해당 `log_id`의 분석 화면을 열 수 있습니다. 경고음은 브라우저 자동 재생 정책 때문에 기본으로 꺼져 있으며, 상단의 `경고음 꺼` 버튼을 사용자가 한 번 눌러야 켜집니다.
+신규 이벤트가 있으면 우측 상단에 빨간 위험 알림이 표시되고, `상세 로그 보기`로 해당 `log_id`의 분석 화면을 열 수 있습니다. 경고음 토글은 없으며 페이지가 열릴 때 항상 활성화를 시도합니다. 브라우저가 자동 재생을 제한하면 첫 클릭 또는 키 입력에서 오디오 컨텍스트를 자동으로 재개합니다.
 
 커서 API 동작:
 
@@ -527,7 +527,7 @@ python scripts/send_sample_log.py --scenario all --interval 2.5
 
 위 7개는 Web의 수집·필터·차트·상세 표시를 확인하는 fixture이며, Host Agent가 7개를 모두 독립적으로 탐지한다는 뜻이 아닙니다. 실제 Host 연동 대상은 `CLIPBOARD`, `USB_COPY`, `EMAIL_ATTACHMENT`, `WEB_UPLOAD`, `CLOUD_DRIVE` 5개입니다. 메신저 붙여넣기는 독립 `MESSENGER` 훅이 아니라 Clipboard 훅으로 검사하고 `CLIPBOARD` 채널로 기록합니다. `PRINT`는 Web 표시용 fixture만 있으며 현재 Host Agent에서 미지원입니다.
 
-`--analyze-first`가 없는 샘플의 AI 점수와 조치는 실제 탐지나 모델 결과가 아닌 미리 정한 fixture입니다. 이 경우 `model_version`은 `demo-fixture-not-live`, 판단 근거는 `DEMO FIXTURE - NOT LIVE`로 표시됩니다. Web 분석 중계에 연결된 AI 결과를 사용하려면 `--analyze-first`를 추가하고, 대시보드 상단의 `Web 분석` 모드가 `EXTERNAL`인지 확인합니다. 이때 실제 모델 응답을 사용하더라도 입력과 채널 발생 자체는 Web fixture이므로 판단 근거에는 `WEB FIXTURE - NOT HOST LIVE`가 유지됩니다. `MOCK`이면 Web 내부 목 분석입니다. 이 표시는 Web의 `/api/v1/analyze`에만 해당하며, Host Agent가 AI 서버에 직접 연결한 이벤트의 실제 모델 여부는 로그 상세의 `model_version`, `detection_type`, 판단 근거를 함께 확인합니다.
+`--analyze-first`가 없는 샘플의 AI 점수와 조치는 실제 탐지나 모델 결과가 아닌 미리 정한 fixture입니다. 이 경우 `model_version`은 `demo-fixture-not-live`, 판단 근거는 `DEMO FIXTURE - NOT LIVE`로 표시됩니다. Web 분석 중계에 연결된 AI 결과를 사용하려면 `--analyze-first`를 추가하고 `/health`의 `analysis_mode`가 `external`인지 확인합니다. 이때 실제 모델 응답을 사용하더라도 입력과 채널 발생 자체는 Web fixture이므로 판단 근거에는 `WEB FIXTURE - NOT HOST LIVE`가 유지됩니다. `mock`이면 Web 내부 목 분석입니다. 이 표시는 Web의 `/api/v1/analyze`에만 해당하며, Host Agent가 AI 서버에 직접 연결한 이벤트의 실제 모델 여부는 로그 상세의 `model_version`, `detection_type`, 판단 근거를 함께 확인합니다.
 
 모든 신규 이벤트는 KPI, 채널 차트와 최근 로그에 자동 반영됩니다. 경고 토스트와 경고음은 조치가 `BLOCKED`이거나 AI 점수가 설정한 `HIGH_RISK_SCORE_THRESHOLD` 이상인 고위험 이벤트에만 발생합니다.
 
@@ -696,7 +696,7 @@ python -c "from fastapi.testclient import TestClient; print('TestClient ready')"
 준실시간 다중 시나리오 반영을 수동으로 확인하려면 다음 순서를 사용합니다.
 
 1. 서버를 실행하고 `/dashboard`를 먼저 열어 초기 커서를 준비합니다.
-2. 소리가 필요하면 상단 `경고음 꺼`를 눌러 `켬`으로 바꿉니다.
+2. 브라우저 자동 재생 제한을 해제하도록 화면을 한 번 클릭하거나 키를 누릅니다.
 3. Host Agent에서 지원하는 5개 반출 경로를 실제로 시도하거나, 다음 Web 표시용 fixture 7건을 순차 전송합니다.
 
 ```bash

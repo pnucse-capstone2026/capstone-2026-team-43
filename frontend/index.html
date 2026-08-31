@@ -175,28 +175,6 @@
             padding: 24px;
         }
 
-        .topbar {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 18px;
-            margin-bottom: 22px;
-        }
-
-        .page-eyebrow {
-            color: var(--blue);
-            font-size: 12px;
-            font-weight: 900;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-        }
-
-        .topbar h1 {
-            margin-top: 6px;
-            font-size: clamp(1.5rem, 2.5vw, 2.35rem);
-            letter-spacing: -0.04em;
-        }
-
         .page {
             display: none;
         }
@@ -954,11 +932,6 @@
                 padding: 16px;
             }
 
-            .topbar {
-                flex-direction: column;
-                align-items: flex-start;
-            }
-
             .hero-main,
             .priority-card,
             .card,
@@ -1054,13 +1027,6 @@
         </aside>
 
         <main class="main">
-            <header class="topbar">
-                <div>
-                    <div class="page-eyebrow" id="pageEyebrow">Dashboard</div>
-                    <h1 id="pageTitle">민감정보 파일 반출 탐지 현황</h1>
-                </div>
-            </header>
-
             <section class="page" id="dashboardPage">
                 <section class="hero">
                     <div class="panel hero-main">
@@ -1267,10 +1233,6 @@
             document.getElementById("logsPage").classList.toggle("active", page === "logs");
             document.getElementById("navDashboard").classList.toggle("active", page === "dashboard");
             document.getElementById("navLogs").classList.toggle("active", page === "logs");
-            document.getElementById("pageEyebrow").textContent = page === "logs" ? "Logs" : "Dashboard";
-            document.getElementById("pageTitle").textContent = page === "logs"
-                ? "탐지 로그 상세 분석"
-                : "민감정보 파일 반출 탐지 현황";
         }
 
         setPage(currentPage);

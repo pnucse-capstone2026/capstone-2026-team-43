@@ -570,13 +570,17 @@ def test_agent_heartbeat_rejects_unbounded_or_invalid_fields(
     assert any(item["loc"][-1] == field for item in response.json()["detail"])
 
 
-def test_frontend_hides_header_status_controls_and_agent_polling(
+def test_frontend_hides_header_controls_and_agent_polling(
     client: TestClient,
 ) -> None:
     html = client.get("/dashboard").text
 
     for removed_marker in (
         'class="topbar-meta"',
+        'class="topbar"',
+        'id="pageEyebrow"',
+        'id="pageTitle"',
+        "민감정보 파일 반출 탐지 현황",
         'id="apiStatus"',
         'id="analysisMode"',
         'id="agentProcessStatus"',

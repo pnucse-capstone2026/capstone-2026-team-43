@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-store">
     <title>민감정보 파일 반출 탐지를 위한 AI 기반 Host DLP 시스템</title>
     <script
         src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"
@@ -147,6 +148,15 @@
             display: grid;
             place-items: center;
             background: rgba(37, 99, 235, 0.08);
+        }
+
+        .sidebar-refresh {
+            margin-top: auto;
+            padding: 0 10px 4px;
+            color: #8a98ad;
+            font-size: 11px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
         }
 
         .sidebar-card {
@@ -392,6 +402,11 @@
             font-weight: 950;
             letter-spacing: 0.08em;
             text-transform: uppercase;
+        }
+
+        .hero .section-kicker {
+            position: relative;
+            top: -6px;
         }
 
         .section-head h3 {
@@ -911,6 +926,11 @@
                 display: none;
             }
 
+            .sidebar-refresh {
+                margin-top: 0;
+                margin-left: auto;
+            }
+
             .hero,
             .grid {
                 grid-template-columns: 1fr;
@@ -1024,6 +1044,7 @@
                     API Docs
                 </a>
             </nav>
+            <div class="sidebar-refresh">최근 새로고침<br><span id="lastRefreshed">--:--:--</span></div>
         </aside>
 
         <main class="main">
@@ -1315,11 +1336,11 @@
 
         function escapeHtml(value) {
             return String(value ?? "")
-                .replaceAll("&", "&amp;")
-                .replaceAll("<", "&lt;")
-                .replaceAll(">", "&gt;")
-                .replaceAll('"', "&quot;")
-                .replaceAll("'", "&#039;");
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
         }
 
         function renderDashboardSummary(summary) {
@@ -1364,15 +1385,22 @@
         }
 
         async function refreshDashboardData() {
-            const [, logsResponse] = await Promise.all([
-                refreshDashboardSummary(),
-                fetch("/api/v1/logs?limit=50", { cache: "no-store" })
-            ]);
-            if (!logsResponse.ok) {
-                throw new Error(`Recent logs request failed: ${logsResponse.status}`);
+            try {
+                await refreshDashboardSummary();
+            } catch (error) {
+                console.warn("대시보드 요약 갱신 실패", error);
             }
-            const logs = await logsResponse.json();
-            renderRecentLogs(logs.items || []);
+
+            try {
+                const logsResponse = await fetch("/api/v1/logs?limit=50", { cache: "no-store" });
+                if (!logsResponse.ok) {
+                    throw new Error(`Recent logs request failed: ${logsResponse.status}`);
+                }
+                const logs = await logsResponse.json();
+                renderRecentLogs(logs.items || []);
+            } catch (error) {
+                console.warn("최근 탐지 로그 갱신 실패", error);
+            }
         }
 
         function hideRealtimeRiskAlert() {
@@ -1498,6 +1526,10 @@
                 }
 
                 const result = await response.json();
+                setText(
+                    "lastRefreshed",
+                    new Date().toLocaleTimeString("ko-KR", { hour12: false })
+                );
                 const items = Array.isArray(result.items) ? result.items : [];
                 const nextCursor = Number(result.next_cursor);
                 const previousCursor = riskAlertCursor;
@@ -1992,7 +2024,8 @@
         }
 
         async function loadFilterOptions() {
-            const response = await fetch("/api/v1/logs/filter-options");
+            const response = await fetch("/api/v1/logs/filter-options", { cache: "no-store" });
+            if (!response.ok) throw new Error(`Filter options request failed: ${response.status}`);
             const options = await response.json();
             renderFilterOptions(options);
         }
@@ -2003,7 +2036,7 @@
             currentLogDetail = null;
             renderLogDetail(null);
             renderHighRiskEvents(currentHighRiskItems);
-            const response = await fetch(buildLogQuery(currentLogPage));
+            const response = await fetch(buildLogQuery(currentLogPage), { cache: "no-store" });
             if (!response.ok) throw new Error(`Log list request failed: ${response.status}`);
             const logs = await response.json();
             const total = Number(logs.total);
@@ -2017,19 +2050,23 @@
         }
 
         async function loadDashboard() {
-            const summaryGeneration = ++dashboardSummaryRequestGeneration;
             try {
-                const summaryResponse = await fetch("/api/v1/dashboard/summary");
-                if (!summaryResponse.ok) {
-                    throw new Error(`Dashboard summary request failed: ${summaryResponse.status}`);
-                }
-                const summary = await summaryResponse.json();
+                await refreshDashboardSummary();
+            } catch (error) {
+                document.getElementById("departmentRanking").innerHTML =
+                    '<div class="empty">요약 정보를 불러오지 못했습니다.</div>';
+                document.getElementById("highRiskEvents").innerHTML =
+                    '<div class="empty">고위험 이벤트 정보를 불러오지 못했습니다.</div>';
+                console.error(error);
+            }
 
-                if (summaryGeneration > dashboardSummaryRenderGeneration) {
-                    dashboardSummaryRenderGeneration = summaryGeneration;
-                    renderDashboardSummary(summary);
-                }
+            try {
                 await loadFilterOptions();
+            } catch (error) {
+                console.error(error);
+            }
+
+            try {
                 await loadLogs();
 
                 if (currentPage === "logs" && pendingLogId) {
@@ -2040,10 +2077,8 @@
                 setText("logMeta", "로그 정보를 불러오지 못했습니다.");
                 document.getElementById("logTableWrap").innerHTML =
                     '<div class="empty">API 연결에 실패했습니다. FastAPI 서버가 실행 중인지 확인해주세요.</div>';
-                document.getElementById("departmentRanking").innerHTML =
-                    '<div class="empty">요약 정보를 불러오지 못했습니다.</div>';
-                document.getElementById("highRiskEvents").innerHTML =
-                    '<div class="empty">고위험 이벤트 정보를 불러오지 못했습니다.</div>';
+                document.getElementById("recentLogsWrap").innerHTML =
+                    '<div class="empty">최근 탐지 로그를 불러오지 못했습니다.</div>';
                 renderLogDetail(null);
                 console.error(error);
             }

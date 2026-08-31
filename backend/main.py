@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "backend" / "dlp_dashboard.db"
 FRONTEND_PATH = BASE_DIR / "frontend" / "index.html"
+NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 DEFAULT_AGENT_API_TOKEN = "sentry-agent-demo-token"
 AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", DEFAULT_AGENT_API_TOKEN)
 MOCK_MODEL_VERSION = "koelectra-v0.1-mock"
@@ -928,14 +929,14 @@ def list_agent_processes() -> dict:
 async def dashboard() -> FileResponse:
     if not FRONTEND_PATH.exists():
         raise HTTPException(status_code=404, detail="Dashboard file not found.")
-    return FileResponse(FRONTEND_PATH)
+    return FileResponse(FRONTEND_PATH, headers=NO_STORE_HEADERS)
 
 
 @app.get("/logs", dependencies=[Depends(verify_dashboard_viewer)])
 async def logs_page() -> FileResponse:
     if not FRONTEND_PATH.exists():
         raise HTTPException(status_code=404, detail="Dashboard file not found.")
-    return FileResponse(FRONTEND_PATH)
+    return FileResponse(FRONTEND_PATH, headers=NO_STORE_HEADERS)
 
 
 @app.post("/api/v1/analyze", response_model=AnalyzeResponse)

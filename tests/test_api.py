@@ -251,6 +251,7 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
     for path in ("/dashboard", "/logs"):
         response = client.get(path)
         assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
         assert "AI 기반 Host DLP 시스템" in response.text
         assert 'value="CLIPBOARD"' in response.text
         assert 'value="CLOUD_DRIVE"' in response.text
@@ -600,6 +601,10 @@ def test_frontend_hides_header_controls_and_agent_polling(
 
 def test_frontend_realtime_risk_alert_contract(client: TestClient) -> None:
     html = client.get("/dashboard").text
+
+    assert '<meta http-equiv="Cache-Control" content="no-store">' in html
+    assert ".replaceAll(" not in html
+    assert '.replace(/&/g, "&amp;")' in html
 
     for marker in (
         'id="realtimeRiskAlert"',

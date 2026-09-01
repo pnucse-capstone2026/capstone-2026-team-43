@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -12,22 +14,22 @@ from secrets import compare_digest
 from time import perf_counter
 from typing import Annotated, Any, Literal
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request as URLRequest, urlopen
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "backend" / "dlp_dashboard.db"
 FRONTEND_PATH = BASE_DIR / "frontend" / "index.html"
 NO_STORE_HEADERS = {"Cache-Control": "no-store"}
-DEFAULT_AGENT_API_TOKEN = "sentry-agent-demo-token"
-AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", DEFAULT_AGENT_API_TOKEN)
-MOCK_MODEL_VERSION = "koelectra-v0.1-mock"
+AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "").strip()
+AGENT_API_TOKENS_JSON = os.getenv("AGENT_API_TOKENS_JSON", "").strip()
 AI_SERVER_URL = os.getenv("AI_SERVER_URL", "").strip()
 AI_SERVER_TOKEN = os.getenv("AI_SERVER_TOKEN", "").strip()
 AI_SERVER_TIMEOUT_SECONDS = float(os.getenv("AI_SERVER_TIMEOUT_SECONDS", "5"))
@@ -73,6 +75,32 @@ def require_ascii_token(name: str, value: str) -> None:
         raise RuntimeError(f"{name} must contain at least 32 ASCII characters.")
 
 
+def parse_agent_api_tokens(raw_value: str) -> dict[str, str]:
+    if not raw_value:
+        return {}
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("AGENT_API_TOKENS_JSON must be a JSON object.") from error
+    if not isinstance(parsed, dict) or not parsed:
+        raise RuntimeError("AGENT_API_TOKENS_JSON must be a non-empty JSON object.")
+
+    tokens: dict[str, str] = {}
+    for raw_agent_id, raw_token in parsed.items():
+        if not isinstance(raw_agent_id, str) or not 1 <= len(raw_agent_id.strip()) <= 100:
+            raise RuntimeError("AGENT_API_TOKENS_JSON keys must be 1-100 character agent IDs.")
+        if not isinstance(raw_token, str):
+            raise RuntimeError("AGENT_API_TOKENS_JSON values must be ASCII tokens.")
+        agent_id = raw_agent_id.strip()
+        if agent_id in tokens:
+            raise RuntimeError("AGENT_API_TOKENS_JSON agent IDs must be unique after trimming.")
+        require_ascii_token(f"AGENT_API_TOKENS_JSON[{agent_id!r}]", raw_token)
+        if raw_token in tokens.values():
+            raise RuntimeError("AGENT_API_TOKENS_JSON tokens must be unique per agent.")
+        tokens[agent_id] = raw_token
+    return tokens
+
+
 def validate_dashboard_auth_configuration(
     viewer_username: str,
     viewer_password: str,
@@ -116,8 +144,11 @@ def validate_dashboard_auth_configuration(
     return True
 
 
-if AGENT_API_TOKEN != DEFAULT_AGENT_API_TOKEN:
+if AGENT_API_TOKEN:
     require_ascii_token("AGENT_API_TOKEN", AGENT_API_TOKEN)
+AGENT_API_TOKENS = parse_agent_api_tokens(AGENT_API_TOKENS_JSON)
+if AGENT_API_TOKEN and AGENT_API_TOKENS:
+    raise RuntimeError("Configure AGENT_API_TOKEN or AGENT_API_TOKENS_JSON, not both.")
 if AI_SERVER_URL:
     require_ascii_token("AI_SERVER_TOKEN", AI_SERVER_TOKEN)
 if not math.isfinite(AI_SERVER_TIMEOUT_SECONDS) or AI_SERVER_TIMEOUT_SECONDS <= 0:
@@ -146,7 +177,9 @@ MetadataString = Annotated[str, Field(max_length=500)]
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(dashboard_app: FastAPI):
+    if not getattr(dashboard_app.state, "security_validated", False):
+        raise RuntimeError("Start the dashboard with: python run_dashboard.py")
     init_db()
     yield
 
@@ -155,7 +188,11 @@ app = FastAPI(
     version="0.1.0",
     description="Host DLP events collection and dashboard API.",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
+app.state.security_validated = False
 dashboard_basic = HTTPBasic(auto_error=False)
 
 class LogCreate(BaseModel):
@@ -181,7 +218,8 @@ class LogCreate(BaseModel):
         "CLOUD_DRIVE",
     ]
     detection_type: Literal["RULE_BASED", "AI_MODEL", "HYBRID"]
-    ai_score: float = Field(..., ge=0.0, le=1.0)
+    analysis_status: Literal["SUCCESS", "FAILED", "SKIPPED"]
+    ai_score: float | None = Field(default=None, ge=0.0, le=1.0)
     model_version: str | None = Field(default=None, max_length=100)
     matched_keywords: list[MatchedItem] = Field(default_factory=list, max_length=100)
     policy_id: str | None = Field(default=None, max_length=100)
@@ -196,6 +234,14 @@ class LogCreate(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("timestamp must include a UTC offset")
         return value
+
+    @model_validator(mode="after")
+    def analysis_result_must_be_consistent(self) -> LogCreate:
+        if self.analysis_status == "SUCCESS" and self.ai_score is None:
+            raise ValueError("ai_score is required when analysis_status is SUCCESS")
+        if self.analysis_status != "SUCCESS" and self.ai_score is not None:
+            raise ValueError("ai_score must be null unless analysis_status is SUCCESS")
+        return self
 
 
 class AnalyzeRequest(BaseModel):
@@ -262,16 +308,39 @@ class PolicyCreate(BaseModel):
 
 def verify_agent_token(
     x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
-) -> None:
+    x_agent_id: str | None = Header(default=None, alias="X-Agent-ID"),
+) -> str | None:
     try:
         provided_token = (x_agent_token or "").encode("ascii")
     except UnicodeEncodeError:
         provided_token = b""
-    if not provided_token or not compare_digest(
+
+    if AGENT_API_TOKENS:
+        expected_token = AGENT_API_TOKENS.get((x_agent_id or "").strip())
+        if expected_token and provided_token and compare_digest(
+            provided_token,
+            expected_token.encode("ascii"),
+        ):
+            return x_agent_id.strip()
+    elif AGENT_API_TOKEN and provided_token and compare_digest(
         provided_token,
         AGENT_API_TOKEN.encode("ascii"),
     ):
+        return None
+
+    if not AGENT_API_TOKEN and not AGENT_API_TOKENS:
+        raise HTTPException(status_code=503, detail="Agent authentication is not configured.")
+    else:
         raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
+
+
+def require_secure_dashboard_transport(request: Request) -> None:
+    if DASHBOARD_AUTH_ENABLED and request.url.scheme != "https":
+        raise HTTPException(
+            status_code=426,
+            detail="Dashboard Basic authentication requires HTTPS.",
+            headers={"Upgrade": "TLS/1.2"},
+        )
 
 
 def dashboard_role(
@@ -306,25 +375,30 @@ def dashboard_role(
 
 
 def verify_dashboard_viewer(
+    request: Request,
     credentials: Annotated[
         HTTPBasicCredentials | None,
         Depends(dashboard_basic),
     ],
 ) -> None:
     if DASHBOARD_AUTH_ENABLED:
+        require_secure_dashboard_transport(request)
         dashboard_role(credentials)
 
 
 def verify_policy_admin_access(
+    request: Request,
     credentials: Annotated[
         HTTPBasicCredentials | None,
         Depends(dashboard_basic),
     ],
     x_agent_token: str | None = Header(default=None, alias="X-Agent-Token"),
+    x_agent_id: str | None = Header(default=None, alias="X-Agent-ID"),
 ) -> str:
     if not DASHBOARD_AUTH_ENABLED:
-        verify_agent_token(x_agent_token)
+        verify_agent_token(x_agent_token, x_agent_id)
         return "agent-token"
+    require_secure_dashboard_transport(request)
     if dashboard_role(credentials) != "admin":
         raise HTTPException(
             status_code=403,
@@ -333,92 +407,12 @@ def verify_policy_admin_access(
     return "dashboard-admin"
 
 
-def normalize_text_items(items: list[str]) -> set[str]:
-    return {item.strip().lower() for item in items if item.strip()}
-
-
-def mock_analyze(payload: AnalyzeRequest) -> dict:
-    started_at = perf_counter()
-    snippet = payload.snippet.lower()
-    matched_patterns = normalize_text_items(payload.matched_patterns)
-    severity_hint = str(payload.metadata.get("severity_hint", "") or "").lower()
-    destination = str(payload.metadata.get("dest", "") or "").lower()
-
-    sensitive_weights = {
-        "rrn": 0.22,
-        "resident_registration_number": 0.22,
-        "api_key": 0.20,
-        "secret": 0.18,
-        "password": 0.18,
-        "source_code": 0.18,
-        "confidential": 0.18,
-        "nda": 0.14,
-        "contract": 0.12,
-        "salary": 0.12,
-        "revenue": 0.12,
-        "forecast": 0.12,
-        "prototype": 0.10,
-        "internal": 0.08,
-        "roadmap": 0.08,
-    }
-    severity_weights = {
-        "critical": 0.30,
-        "high": 0.22,
-        "medium": 0.12,
-        "low": 0.04,
-    }
-
-    score = 0.18
-    evidence: list[str] = []
-
-    for keyword, weight in sensitive_weights.items():
-        if keyword in matched_patterns or keyword in snippet:
-            score += weight
-            evidence.append(keyword)
-
-    if severity_hint in severity_weights:
-        score += severity_weights[severity_hint]
-        evidence.append(f"severity:{severity_hint}")
-
-    if destination in {"external", "outside", "internet", "removable"}:
-        score += 0.10
-        evidence.append(f"dest:{destination}")
-
-    if payload.channel in {
-        "usb",
-        "file_guard",
-        "web_upload",
-        "web_mail",
-        "drive_upload",
-        "email_attachment",
-        "outlook",
-        "smtp",
-        "http",
-    }:
-        score += 0.06
-        evidence.append(f"channel:{payload.channel}")
-
-    confidence_score = round(min(score, 0.99), 2)
-    if confidence_score >= 0.85:
-        decision = "block"
-    elif confidence_score >= 0.60:
-        decision = "review"
-    else:
-        decision = "allow"
-
-    latency_ms = max(1, round((perf_counter() - started_at) * 1000))
-    evidence_summary = ", ".join(dict.fromkeys(evidence[:8])) or "no sensitive signal"
-
-    reason = f"Mock AI analysis matched: {evidence_summary}."
-    return {
-        "event_id": payload.event_id,
-        "decision": decision,
-        "confidence_score": confidence_score,
-        "model_version": MOCK_MODEL_VERSION,
-        "latency_ms": latency_ms,
-        "reason": reason,
-        "evidence_summary": reason,
-    }
+def require_matching_agent_id(authenticated_agent_id: str | None, payload_agent_id: str) -> None:
+    if authenticated_agent_id is not None and authenticated_agent_id != payload_agent_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Authenticated agent ID does not match the payload.",
+        )
 
 
 def get_external_analyze_url() -> str | None:
@@ -447,21 +441,18 @@ def normalize_external_analyze_response(payload: AnalyzeRequest, raw_response: A
     if decision not in {"allow", "review", "block"}:
         raise HTTPException(status_code=502, detail="AI server response has an invalid decision.")
 
-    raw_score = raw_response.get(
-        "confidence_score",
-        raw_response.get("ai_score", raw_response.get("score")),
-    )
-    if isinstance(raw_score, bool):
-        raise HTTPException(status_code=502, detail="AI server response has an invalid score.")
-    try:
-        confidence_score = float(raw_score)
-    except (TypeError, ValueError) as error:
-        raise HTTPException(status_code=502, detail="AI server response has an invalid score.") from error
-
-    if 1.0 < confidence_score <= 100.0:
-        confidence_score = confidence_score / 100.0
+    raw_score = raw_response.get("confidence_score")
+    if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+        raise HTTPException(
+            status_code=502,
+            detail="AI server confidence_score must be a number between 0 and 1.",
+        )
+    confidence_score = float(raw_score)
     if not math.isfinite(confidence_score) or not 0.0 <= confidence_score <= 1.0:
-        raise HTTPException(status_code=502, detail="AI server score must be between 0 and 1.")
+        raise HTTPException(
+            status_code=502,
+            detail="AI server confidence_score must be between 0 and 1.",
+        )
 
     returned_latency = raw_response.get("latency_ms", latency_ms)
     if isinstance(returned_latency, bool):
@@ -525,7 +516,7 @@ def normalize_external_analyze_response(payload: AnalyzeRequest, raw_response: A
 def call_external_ai_server(payload: AnalyzeRequest) -> dict:
     analyze_url = get_external_analyze_url()
     if analyze_url is None:
-        return mock_analyze(payload)
+        raise HTTPException(status_code=503, detail="AI proxy is not configured.")
 
     started_at = perf_counter()
     body = json.dumps(payload.model_dump()).encode("utf-8")
@@ -533,7 +524,7 @@ def call_external_ai_server(payload: AnalyzeRequest) -> dict:
     if AI_SERVER_TOKEN:
         headers["Authorization"] = f"Bearer {AI_SERVER_TOKEN}"
 
-    request = Request(analyze_url, data=body, headers=headers, method="POST")
+    request = URLRequest(analyze_url, data=body, headers=headers, method="POST")
 
     try:
         with urlopen(request, timeout=AI_SERVER_TIMEOUT_SECONDS) as response:
@@ -569,8 +560,70 @@ def get_connection() -> sqlite3.Connection:
     return connection
 
 
+def decode_matched_keywords(raw_value: str | None) -> list[str]:
+    raw_value = raw_value or ""
+    try:
+        decoded = json.loads(raw_value)
+        if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
+            raise ValueError
+        return decoded
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return [item for item in raw_value.split(",") if item]
+
+
+def log_payload_hash(payload: LogCreate) -> str:
+    canonical = payload.model_dump(mode="json")
+    canonical["timestamp"] = payload.timestamp.astimezone(timezone.utc).isoformat()
+    serialized = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def create_log_table(cursor: sqlite3.Cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dlp_logs (
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT,
+            agent_id TEXT,
+            timestamp TEXT NOT NULL,
+            received_at TEXT,
+            host_ip TEXT NOT NULL,
+            hostname TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            department TEXT NOT NULL,
+            file_name TEXT NOT NULL,
+            file_path TEXT,
+            process_name TEXT,
+            leak_channel TEXT NOT NULL,
+            detection_type TEXT NOT NULL,
+            analysis_status TEXT NOT NULL
+                CHECK (analysis_status IN ('SUCCESS', 'FAILED', 'SKIPPED')),
+            ai_score REAL,
+            model_version TEXT,
+            matched_keywords TEXT NOT NULL,
+            policy_id TEXT,
+            action_taken TEXT NOT NULL,
+            decision_reason TEXT,
+            evidence_summary TEXT NOT NULL,
+            latency_ms INTEGER,
+            payload_hash TEXT,
+            CHECK (
+                (analysis_status = 'SUCCESS' AND ai_score BETWEEN 0.0 AND 1.0)
+                OR (analysis_status IN ('FAILED', 'SKIPPED') AND ai_score IS NULL)
+            )
+        )
+        """
+    )
+
+
 def ensure_log_schema(cursor: sqlite3.Cursor) -> None:
-    columns = {row["name"] for row in cursor.execute("PRAGMA table_info(dlp_logs)").fetchall()}
+    table_info = cursor.execute("PRAGMA table_info(dlp_logs)").fetchall()
+    columns = {row["name"]: row for row in table_info}
     column_definitions = {
         "event_id": "TEXT",
         "agent_id": "TEXT",
@@ -586,6 +639,68 @@ def ensure_log_schema(cursor: sqlite3.Cursor) -> None:
     for column_name, column_type in column_definitions.items():
         if column_name not in columns:
             cursor.execute(f"ALTER TABLE dlp_logs ADD COLUMN {column_name} {column_type}")
+
+    table_info = cursor.execute("PRAGMA table_info(dlp_logs)").fetchall()
+    columns = {row["name"]: row for row in table_info}
+    if (
+        "analysis_status" not in columns
+        or "payload_hash" not in columns
+        or columns["ai_score"]["notnull"]
+    ):
+        cursor.execute("ALTER TABLE dlp_logs RENAME TO dlp_logs_legacy")
+        create_log_table(cursor)
+        cursor.execute(
+            """
+            INSERT INTO dlp_logs (
+                log_id, event_id, agent_id, timestamp, received_at, host_ip,
+                hostname, user_id, department, file_name, file_path,
+                process_name, leak_channel, detection_type, analysis_status,
+                ai_score, model_version, matched_keywords, policy_id,
+                action_taken, decision_reason, evidence_summary, latency_ms
+            )
+            SELECT
+                log_id, event_id, agent_id, timestamp, received_at, host_ip,
+                hostname, user_id, department, file_name, file_path,
+                process_name, leak_channel, detection_type,
+                CASE
+                    WHEN model_version = 'unavailable' THEN 'FAILED'
+                    WHEN detection_type = 'RULE_BASED' AND model_version IS NULL THEN 'SKIPPED'
+                    ELSE 'SUCCESS'
+                END,
+                CASE
+                    WHEN model_version = 'unavailable' THEN NULL
+                    WHEN detection_type = 'RULE_BASED' AND model_version IS NULL THEN NULL
+                    ELSE ai_score
+                END,
+                model_version, matched_keywords, policy_id, action_taken,
+                decision_reason, evidence_summary, latency_ms
+            FROM dlp_logs_legacy
+            """
+        )
+        cursor.execute("DROP TABLE dlp_logs_legacy")
+
+    rows_without_hash = cursor.execute(
+        "SELECT * FROM dlp_logs WHERE event_id IS NOT NULL AND payload_hash IS NULL"
+    ).fetchall()
+    for row in rows_without_hash:
+        payload = LogCreate.model_validate(
+            {
+                key: row[key]
+                for key in (
+                    "event_id", "agent_id", "timestamp", "host_ip", "hostname",
+                    "user_id", "department", "file_name", "file_path",
+                    "process_name", "leak_channel", "detection_type",
+                    "analysis_status", "ai_score", "model_version", "policy_id",
+                    "action_taken", "decision_reason", "evidence_summary",
+                    "latency_ms",
+                )
+            }
+            | {"matched_keywords": decode_matched_keywords(row["matched_keywords"])}
+        )
+        cursor.execute(
+            "UPDATE dlp_logs SET payload_hash = ? WHERE log_id = ?",
+            (log_payload_hash(payload), row["log_id"]),
+        )
 
     cursor.execute(
         """
@@ -621,34 +736,7 @@ def init_db() -> None:
             """,
             (DATABASE_EPOCH_KEY, str(uuid4())),
         )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS dlp_logs (
-                log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id TEXT,
-                agent_id TEXT,
-                timestamp TEXT NOT NULL,
-                received_at TEXT,
-                host_ip TEXT NOT NULL,
-                hostname TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                department TEXT NOT NULL,
-                file_name TEXT NOT NULL,
-                file_path TEXT,
-                process_name TEXT,
-                leak_channel TEXT NOT NULL,
-                detection_type TEXT NOT NULL,
-                ai_score REAL NOT NULL,
-                model_version TEXT,
-                matched_keywords TEXT NOT NULL,
-                policy_id TEXT,
-                action_taken TEXT NOT NULL,
-                decision_reason TEXT,
-                evidence_summary TEXT NOT NULL,
-                latency_ms INTEGER
-            )
-            """
-        )
+        create_log_table(cursor)
         ensure_log_schema(cursor)
         cursor.execute(
             """
@@ -710,6 +798,35 @@ def init_db() -> None:
                 """
             )
 
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dlp_ingest_conflicts (
+                conflict_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                occurred_at TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                agent_id TEXT,
+                stored_payload_hash TEXT NOT NULL,
+                received_payload_hash TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dlp_ingest_conflicts_occurred_at
+            ON dlp_ingest_conflicts(occurred_at DESC, conflict_id DESC)
+            """
+        )
+        for operation in ("UPDATE", "DELETE"):
+            cursor.execute(
+                f"""
+                CREATE TRIGGER IF NOT EXISTS reject_dlp_ingest_conflicts_{operation.lower()}
+                BEFORE {operation} ON dlp_ingest_conflicts
+                BEGIN
+                    SELECT RAISE(ABORT, 'ingest conflict audit is append-only');
+                END
+                """
+            )
+
         policy_count = cursor.execute("SELECT COUNT(*) FROM dlp_policies").fetchone()[0]
         if policy_count == 0:
             cursor.executemany(
@@ -742,16 +859,6 @@ def init_db() -> None:
 
 
 def serialize_log(row: sqlite3.Row) -> dict:
-    matched_keywords = row["matched_keywords"] or ""
-    try:
-        decoded_keywords = json.loads(matched_keywords)
-        if not isinstance(decoded_keywords, list) or not all(
-            isinstance(item, str) for item in decoded_keywords
-        ):
-            raise ValueError
-    except (json.JSONDecodeError, TypeError, ValueError):
-        decoded_keywords = [item for item in matched_keywords.split(",") if item]
-
     return {
         "log_id": row["log_id"],
         "event_id": row["event_id"],
@@ -767,9 +874,10 @@ def serialize_log(row: sqlite3.Row) -> dict:
         "process_name": row["process_name"],
         "leak_channel": row["leak_channel"],
         "detection_type": row["detection_type"],
+        "analysis_status": row["analysis_status"],
         "ai_score": row["ai_score"],
         "model_version": row["model_version"],
-        "matched_keywords": decoded_keywords,
+        "matched_keywords": decode_matched_keywords(row["matched_keywords"]),
         "policy_id": row["policy_id"],
         "action_taken": row["action_taken"],
         "decision_reason": row["decision_reason"],
@@ -825,12 +933,45 @@ async def read_root() -> dict:
     }
 
 
+@app.get(
+    "/openapi.json",
+    dependencies=[Depends(verify_dashboard_viewer)],
+    include_in_schema=False,
+)
+def protected_openapi() -> JSONResponse:
+    return JSONResponse(app.openapi(), headers=NO_STORE_HEADERS)
+
+
+@app.get(
+    "/docs",
+    dependencies=[Depends(verify_dashboard_viewer)],
+    include_in_schema=False,
+)
+def protected_swagger_docs() -> HTMLResponse:
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title=f"{app.title} - Swagger UI",
+    )
+
+
+@app.get(
+    "/redoc",
+    dependencies=[Depends(verify_dashboard_viewer)],
+    include_in_schema=False,
+)
+def protected_redoc() -> HTMLResponse:
+    return get_redoc_html(
+        openapi_url="/openapi.json",
+        title=f"{app.title} - ReDoc",
+    )
+
+
 @app.get("/health")
 def health_check() -> dict:
     health = {
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "analysis_mode": "external" if get_external_analyze_url() else "mock",
+        "analysis_mode": "external" if get_external_analyze_url() else "disabled",
         "ai_server_url_configured": bool(get_external_analyze_url()),
         "high_risk_score_threshold": HIGH_RISK_SCORE_THRESHOLD,
         "dashboard_auth_enabled": DASHBOARD_AUTH_ENABLED,
@@ -866,9 +1007,10 @@ async def agent_connection_check() -> dict:
 @app.post("/api/v1/agents/heartbeat")
 def record_agent_heartbeat(
     payload: AgentHeartbeat,
-    _: None = Depends(verify_agent_token),
+    authenticated_agent_id: str | None = Depends(verify_agent_token),
 ) -> dict:
     """Record process liveness using the Web server's clock."""
+    require_matching_agent_id(authenticated_agent_id, payload.agent_id)
     last_seen_at = datetime.now(timezone.utc).isoformat()
     with closing(get_connection()) as connection:
         connection.execute(
@@ -942,7 +1084,7 @@ async def logs_page() -> FileResponse:
 @app.post("/api/v1/analyze", response_model=AnalyzeResponse)
 def analyze_event(
     payload: AnalyzeRequest,
-    _: None = Depends(verify_agent_token),
+    _: str | None = Depends(verify_agent_token),
 ) -> dict:
     """Run the blocking upstream HTTP call in FastAPI's worker thread pool."""
     return call_external_ai_server(payload)
@@ -951,25 +1093,51 @@ def analyze_event(
 @app.post("/api/v1/logs", status_code=201)
 def create_log(
     payload: LogCreate,
-    _: None = Depends(verify_agent_token),
+    authenticated_agent_id: str | None = Depends(verify_agent_token),
 ) -> JSONResponse:
+    if payload.agent_id is None and authenticated_agent_id is not None:
+        raise HTTPException(status_code=422, detail="agent_id is required with per-agent tokens.")
+    if payload.agent_id is not None:
+        require_matching_agent_id(authenticated_agent_id, payload.agent_id)
     received_at = datetime.now(timezone.utc).isoformat()
+    incoming_payload_hash = log_payload_hash(payload)
 
     with closing(get_connection()) as connection:
         cursor = connection.cursor()
         existing_log = cursor.execute(
-            "SELECT log_id FROM dlp_logs WHERE event_id = ?",
+            "SELECT log_id, payload_hash FROM dlp_logs WHERE event_id = ?",
             (payload.event_id,),
         ).fetchone()
         if existing_log is not None:
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "message": "Log already exists.",
-                    "log_id": existing_log["log_id"],
-                    "event_id": payload.event_id,
-                    "duplicate": True,
-                },
+            if existing_log["payload_hash"] == incoming_payload_hash:
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "message": "Log already exists.",
+                        "log_id": existing_log["log_id"],
+                        "event_id": payload.event_id,
+                        "duplicate": True,
+                    },
+                )
+            cursor.execute(
+                """
+                INSERT INTO dlp_ingest_conflicts (
+                    occurred_at, event_id, agent_id,
+                    stored_payload_hash, received_payload_hash
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    received_at,
+                    payload.event_id,
+                    payload.agent_id,
+                    existing_log["payload_hash"],
+                    incoming_payload_hash,
+                ),
+            )
+            connection.commit()
+            raise HTTPException(
+                status_code=409,
+                detail="event_id already exists with a different payload.",
             )
 
         try:
@@ -978,10 +1146,10 @@ def create_log(
                 INSERT INTO dlp_logs (
                     event_id, agent_id, timestamp, received_at, host_ip, hostname,
                     user_id, department, file_name, file_path, process_name,
-                    leak_channel, detection_type, ai_score, matched_keywords,
-                    model_version, policy_id, action_taken, decision_reason,
-                    evidence_summary, latency_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    leak_channel, detection_type, analysis_status, ai_score,
+                    matched_keywords, model_version, policy_id, action_taken,
+                    decision_reason, evidence_summary, latency_ms, payload_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     payload.event_id,
@@ -997,6 +1165,7 @@ def create_log(
                     payload.process_name,
                     payload.leak_channel,
                     payload.detection_type,
+                    payload.analysis_status,
                     payload.ai_score,
                     json.dumps(payload.matched_keywords, ensure_ascii=False),
                     payload.model_version,
@@ -1005,24 +1174,47 @@ def create_log(
                     payload.decision_reason,
                     payload.evidence_summary,
                     payload.latency_ms,
+                    incoming_payload_hash,
                 ),
             )
         except sqlite3.IntegrityError:
+            connection.rollback()
             existing_log = cursor.execute(
-                "SELECT log_id FROM dlp_logs WHERE event_id = ?",
+                "SELECT log_id, payload_hash FROM dlp_logs WHERE event_id = ?",
                 (payload.event_id,),
             ).fetchone()
             if existing_log is None:
                 raise
 
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "message": "Log already exists.",
-                    "log_id": existing_log["log_id"],
-                    "event_id": payload.event_id,
-                    "duplicate": True,
-                },
+            if existing_log["payload_hash"] == incoming_payload_hash:
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "message": "Log already exists.",
+                        "log_id": existing_log["log_id"],
+                        "event_id": payload.event_id,
+                        "duplicate": True,
+                    },
+                )
+            cursor.execute(
+                """
+                INSERT INTO dlp_ingest_conflicts (
+                    occurred_at, event_id, agent_id,
+                    stored_payload_hash, received_payload_hash
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    received_at,
+                    payload.event_id,
+                    payload.agent_id,
+                    existing_log["payload_hash"],
+                    incoming_payload_hash,
+                ),
+            )
+            connection.commit()
+            raise HTTPException(
+                status_code=409,
+                detail="event_id already exists with a different payload.",
             )
 
         connection.commit()
@@ -1044,6 +1236,7 @@ def list_logs(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     action: str | None = Query(default=None),
+    analysis_status: Literal["SUCCESS", "FAILED", "SKIPPED"] | None = Query(default=None),
     leak_channel: str | None = Query(default=None),
     department: str | None = Query(default=None),
     user_id: str | None = Query(default=None),
@@ -1061,6 +1254,9 @@ def list_logs(
     if action:
         where_clause += " AND action_taken = ?"
         params.append(action)
+    if analysis_status:
+        where_clause += " AND analysis_status = ?"
+        params.append(analysis_status)
     if leak_channel:
         where_clause += " AND leak_channel = ?"
         params.append(leak_channel)
@@ -1156,7 +1352,10 @@ def list_realtime_alerts(
             """
             SELECT * FROM dlp_logs
             WHERE log_id > ?
-              AND (action_taken = 'BLOCKED' OR ai_score >= ?)
+              AND (
+                  action_taken = 'BLOCKED'
+                  OR (analysis_status = 'SUCCESS' AND ai_score >= ?)
+              )
             ORDER BY log_id ASC
             LIMIT ?
             """,
@@ -1216,6 +1415,7 @@ def log_filter_options() -> dict:
         "users": [row["user_id"] for row in users],
         "agents": [row["agent_id"] for row in agents],
         "actions": ["BLOCKED", "WARNED", "ALLOWED"],
+        "analysis_statuses": ["SUCCESS", "FAILED", "SKIPPED"],
         "leak_channels": LEAK_CHANNELS,
     }
 
@@ -1317,6 +1517,31 @@ def list_policy_audit(
     }
 
 
+@app.get("/api/v1/ingest-conflicts")
+def list_ingest_conflicts(
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    _: str = Depends(verify_policy_admin_access),
+) -> dict:
+    with closing(get_connection()) as connection:
+        total = connection.execute(
+            "SELECT COUNT(*) FROM dlp_ingest_conflicts"
+        ).fetchone()[0]
+        rows = connection.execute(
+            """
+            SELECT * FROM dlp_ingest_conflicts
+            ORDER BY occurred_at DESC, conflict_id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        ).fetchall()
+    return {
+        "items": [dict(row) for row in rows],
+        "count": len(rows),
+        "total": total,
+    }
+
+
 @app.get(
     "/api/v1/dashboard/summary",
     dependencies=[Depends(verify_dashboard_viewer)],
@@ -1345,10 +1570,26 @@ def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
     blocked_count = sum(1 for item in logs if item["action_taken"] == "BLOCKED")
     warned_count = sum(1 for item in logs if item["action_taken"] == "WARNED")
     allowed_count = sum(1 for item in logs if item["action_taken"] == "ALLOWED")
+    successful_ai_logs = [
+        item
+        for item in logs
+        if item["analysis_status"] == "SUCCESS" and item["ai_score"] is not None
+    ]
+    failed_analysis_count = sum(
+        1 for item in logs if item["analysis_status"] == "FAILED"
+    )
+    skipped_analysis_count = sum(
+        1 for item in logs if item["analysis_status"] == "SKIPPED"
+    )
+    attempted_analysis_count = len(successful_ai_logs) + failed_analysis_count
     average_score = round(
-        sum(item["ai_score"] for item in logs) / total_events,
+        sum(item["ai_score"] for item in successful_ai_logs) / len(successful_ai_logs),
         2,
-    ) if total_events else 0.0
+    ) if successful_ai_logs else None
+    analysis_failure_rate = round(
+        failed_analysis_count / attempted_analysis_count,
+        4,
+    ) if attempted_analysis_count else 0.0
 
     channel_counter = Counter(item["leak_channel"] for item in logs)
     department_counter = Counter(item["department"] for item in logs)
@@ -1368,7 +1609,11 @@ def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
             item
             for item in logs
             if item["action_taken"] == "BLOCKED"
-            or item["ai_score"] >= HIGH_RISK_SCORE_THRESHOLD
+            or (
+                item["analysis_status"] == "SUCCESS"
+                and item["ai_score"] is not None
+                and item["ai_score"] >= HIGH_RISK_SCORE_THRESHOLD
+            )
         ],
         key=lambda item: item["timestamp"],
         reverse=True,
@@ -1382,6 +1627,10 @@ def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
             "warned_count": warned_count,
             "allowed_count": allowed_count,
             "average_score": average_score,
+            "successful_analysis_count": len(successful_ai_logs),
+            "failed_analysis_count": failed_analysis_count,
+            "skipped_analysis_count": skipped_analysis_count,
+            "analysis_failure_rate": analysis_failure_rate,
         },
         "channel_breakdown": [
             {"channel": channel, "count": count}
@@ -1399,6 +1648,7 @@ def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
                 "file_name": item["file_name"],
                 "file_path": item["file_path"],
                 "leak_channel": item["leak_channel"],
+                "analysis_status": item["analysis_status"],
                 "ai_score": item["ai_score"],
                 "model_version": item["model_version"],
                 "action_taken": item["action_taken"],
@@ -1409,3 +1659,39 @@ def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
         ],
         "timeline": timeline,
     }
+
+
+def is_loopback_host(host: str) -> bool:
+    normalized = host.strip().strip("[]").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_server_security(
+    host: str,
+    ssl_certfile: str | None,
+    ssl_keyfile: str | None,
+) -> None:
+    if not AGENT_API_TOKEN and not AGENT_API_TOKENS:
+        raise RuntimeError(
+            "Set AGENT_API_TOKEN or AGENT_API_TOKENS_JSON before starting the server."
+        )
+    if AGENT_API_TOKEN:
+        require_ascii_token("AGENT_API_TOKEN", AGENT_API_TOKEN)
+    if bool(ssl_certfile) != bool(ssl_keyfile):
+        raise RuntimeError("Configure both --ssl-certfile and --ssl-keyfile.")
+    if is_loopback_host(host):
+        return
+    if not DASHBOARD_AUTH_ENABLED:
+        raise RuntimeError(
+            "Non-loopback binding requires dashboard viewer/admin authentication."
+        )
+    if not ssl_certfile:
+        raise RuntimeError(
+            "Non-loopback binding requires HTTPS. Configure a certificate and key, "
+            "or bind this app to loopback behind an HTTPS reverse proxy."
+        )

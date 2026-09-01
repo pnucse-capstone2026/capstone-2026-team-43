@@ -1079,6 +1079,10 @@
                                     <span class="legend-key"><span class="dot" style="background:#16a34a;"></span>허용 이벤트</span>
                                     <strong id="allowedPriority">0건</strong>
                                 </div>
+                                <div class="legend-item">
+                                    <span class="legend-key"><span class="dot" style="background:#7c3aed;"></span>AI 분석 실패</span>
+                                    <strong id="failedPriority">0건</strong>
+                                </div>
                             </div>
                         </div>
                         <p class="hero-copy">Host Agent가 `POST /api/v1/logs`로 전송한 이벤트가 요약 카드와 차트에 반영됩니다.</p>
@@ -1093,13 +1097,13 @@
                     </div>
                     <div class="panel metric-card span-3">
                         <div class="kpi-title">평균 AI 민감도</div>
-                        <div class="kpi-value" id="avgScore">0.00</div>
-                        <div class="kpi-foot">0.00 ~ 1.00 스케일</div>
+                        <div class="kpi-value" id="avgScore">-</div>
+                        <div class="kpi-foot">정상 AI 분석 결과만 · 0.00 ~ 1.00</div>
                     </div>
                     <div class="panel metric-card span-3">
-                        <div class="kpi-title">최다 탐지 부서</div>
-                        <div class="kpi-value" id="topDepartment">-</div>
-                        <div class="kpi-foot">탐지 건수 기준 상위 부서</div>
+                        <div class="kpi-title">AI 분석 실패율</div>
+                        <div class="kpi-value" id="analysisFailureRate">0%</div>
+                        <div class="kpi-foot">실패 / (성공 + 실패), 미실행 제외</div>
                     </div>
                     <div class="panel metric-card span-3">
                         <div class="kpi-title">차단 비율</div>
@@ -1191,6 +1195,12 @@
                             <option value="WARNED">WARNED</option>
                             <option value="ALLOWED">ALLOWED</option>
                         </select>
+                        <select id="analysisStatusFilter" class="control">
+                            <option value="">전체 AI 상태</option>
+                            <option value="SUCCESS">SUCCESS</option>
+                            <option value="FAILED">FAILED</option>
+                            <option value="SKIPPED">SKIPPED</option>
+                        </select>
                         <select id="channelFilter" class="control">
                             <option value="">전체 채널</option>
                             <option value="USB_COPY">USB_COPY</option>
@@ -1247,6 +1257,7 @@
         let alertAudioContext = null;
         let dashboardSummaryRequestGeneration = 0;
         let dashboardSummaryRenderGeneration = 0;
+        let logListRequestGeneration = 0;
 
         function setPage(page) {
             currentPage = page;
@@ -1343,13 +1354,28 @@
                 .replace(/'/g, "&#039;");
         }
 
+        function formatAiScore(item) {
+            return item?.analysis_status === "SUCCESS" && item.ai_score !== null
+                ? Number(item.ai_score).toFixed(2)
+                : "-";
+        }
+
         function renderDashboardSummary(summary) {
             setText("totalEvents", summary.kpis.total_events);
-            setText("avgScore", Number(summary.kpis.average_score).toFixed(2));
-            setText("topDepartment", summary.top_departments[0]?.department || "-");
+            setText(
+                "avgScore",
+                summary.kpis.average_score === null
+                    ? "-"
+                    : Number(summary.kpis.average_score).toFixed(2)
+            );
+            setText(
+                "analysisFailureRate",
+                `${Math.round(Number(summary.kpis.analysis_failure_rate || 0) * 100)}%`
+            );
             setText("blockedPriority", `${summary.kpis.blocked_count}건`);
             setText("warnedPriority", `${summary.kpis.warned_count}건`);
             setText("allowedPriority", `${summary.kpis.allowed_count}건`);
+            setText("failedPriority", `${summary.kpis.failed_analysis_count}건`);
             const blockedRate = summary.kpis.total_events
                 ? Math.round((summary.kpis.blocked_count / summary.kpis.total_events) * 100)
                 : 0;
@@ -1482,7 +1508,7 @@
             );
             setText(
                 "realtimeRiskMeta",
-                `${newest.department || "부서 미상"} · ${newest.user_id || "사용자 미상"} · AI ${Number(newest.ai_score || 0).toFixed(2)}`
+                `${newest.department || "부서 미상"} · ${newest.user_id || "사용자 미상"} · AI ${formatAiScore(newest)}`
             );
             document.getElementById("realtimeRiskDetails").href =
                 `/logs?log_id=${encodeURIComponent(newest.log_id)}`;
@@ -1635,11 +1661,13 @@
                     class="risk-row ${selectedLogId === item.log_id ? "selected" : ""}"
                     data-log-id="${item.log_id}"
                     tabindex="0"
+                    role="button"
+                    aria-label="${escapeHtml(item.file_name)} 고위험 로그 상세 보기"
                     title="로그 상세 분석으로 이동"
                 >
                     <div class="risk-topline">
                         <span class="badge ${actionBadgeClass(item.action_taken)}">${escapeHtml(item.action_taken)}</span>
-                        <span class="risk-score">AI ${Number(item.ai_score).toFixed(2)}</span>
+                        <span class="risk-score">AI ${formatAiScore(item)}</span>
                     </div>
                     <strong title="${escapeHtml(item.file_name)}">${escapeHtml(item.file_name)}</strong>
                     <div class="risk-meta">
@@ -1666,7 +1694,7 @@
                 window.location.href = `/logs?log_id=${encodeURIComponent(logId)}`;
                 return;
             }
-            focusHighRiskLog(logId);
+            focusHighRiskLog(logId).catch(error => console.error(error));
         }
 
         function renderRecentLogs(items) {
@@ -1691,7 +1719,7 @@
                         </thead>
                         <tbody>
                             ${recentItems.map(item => `
-                                <tr class="log-row" data-log-id="${item.log_id}" tabindex="0" title="로그 상세 분석으로 이동">
+                                <tr class="log-row" data-log-id="${item.log_id}" tabindex="0" role="button" aria-label="${escapeHtml(item.file_name)} 로그 상세 보기" title="로그 상세 분석으로 이동">
                                     <td>${new Date(item.timestamp).toLocaleString("ko-KR")}</td>
                                     <td>${escapeHtml(item.file_name)}</td>
                                     <td>${escapeHtml(item.user_id)}</td>
@@ -1705,8 +1733,15 @@
             `;
 
             container.querySelectorAll(".log-row").forEach(row => {
-                row.addEventListener("click", () => {
+                const openLog = () => {
                     window.location.href = `/logs?log_id=${encodeURIComponent(row.dataset.logId)}`;
+                };
+                row.addEventListener("click", openLog);
+                row.addEventListener("keydown", event => {
+                    if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        openLog();
+                    }
                 });
             });
         }
@@ -1783,8 +1818,8 @@
                             <div class="detail-value">${escapeHtml(item.leak_channel)}</div>
                         </div>
                         <div class="detail-item">
-                            <div class="detail-label">탐지 방식 / AI 점수</div>
-                            <div class="detail-value">${escapeHtml(item.detection_type)} · ${Number(item.ai_score).toFixed(2)}</div>
+                            <div class="detail-label">탐지 방식 / AI 상태 / AI 점수</div>
+                            <div class="detail-value">${escapeHtml(item.detection_type)} · ${escapeHtml(item.analysis_status)} · ${formatAiScore(item)}</div>
                         </div>
                         <div class="detail-item">
                             <div class="detail-label">AI 모델 버전</div>
@@ -1818,7 +1853,8 @@
         }
 
         async function loadLogDetail(logId, scrollTarget = "detail") {
-            selectedLogId = Number(logId);
+            const requestedLogId = Number(logId);
+            selectedLogId = requestedLogId;
             currentLogDetail = { loading: true };
             renderLogs(currentLogItems);
             renderHighRiskEvents(currentHighRiskItems);
@@ -1833,11 +1869,14 @@
             }
 
             try {
-                const response = await fetch(`/api/v1/logs/${selectedLogId}`);
+                const response = await fetch(`/api/v1/logs/${requestedLogId}`);
                 if (!response.ok) throw new Error("Log detail request failed.");
-                currentLogDetail = await response.json();
+                const detail = await response.json();
+                if (selectedLogId !== requestedLogId) return;
+                currentLogDetail = detail;
                 renderLogDetail(currentLogDetail);
             } catch (error) {
+                if (selectedLogId !== requestedLogId) return;
                 currentLogDetail = null;
                 renderLogDetail(null);
                 setText("logMeta", "상세 정보를 불러오지 못했습니다.");
@@ -1852,6 +1891,7 @@
             if (itemIndex === -1) {
                 document.getElementById("searchInput").value = "";
                 document.getElementById("actionFilter").value = "";
+                document.getElementById("analysisStatusFilter").value = "";
                 document.getElementById("channelFilter").value = "";
                 document.getElementById("departmentFilter").value = "";
                 document.getElementById("userFilter").value = "";
@@ -1894,7 +1934,7 @@
                                 <th>사용자 / PC</th>
                                 <th>파일명</th>
                                 <th>채널</th>
-                                <th>엔진</th>
+                                <th>엔진 / AI 상태</th>
                                 <th>AI 점수</th>
                                 <th>조치</th>
                                 <th>근거</th>
@@ -1906,14 +1946,16 @@
                                     class="log-row ${selectedLogId === item.log_id ? "selected" : ""}"
                                     data-log-id="${item.log_id}"
                                     tabindex="0"
+                                    role="button"
+                                    aria-label="${escapeHtml(item.file_name)} 로그 상세 보기"
                                     title="상세 분석 보기"
                                 >
                                     <td>${new Date(item.timestamp).toLocaleString("ko-KR")}</td>
                                     <td>${escapeHtml(item.user_id)}<br>${escapeHtml(item.hostname)} (${escapeHtml(item.host_ip)})</td>
                                     <td>${escapeHtml(item.file_name)}<br><span style="color:var(--muted);">${escapeHtml(item.file_path || item.department)}</span></td>
                                     <td>${escapeHtml(item.leak_channel)}</td>
-                                    <td>${escapeHtml(item.detection_type)}</td>
-                                    <td>${Number(item.ai_score).toFixed(2)}</td>
+                                    <td>${escapeHtml(item.detection_type)}<br>${escapeHtml(item.analysis_status)}</td>
+                                    <td>${formatAiScore(item)}</td>
                                     <td><span class="badge ${actionBadgeClass(item.action_taken)}">${escapeHtml(item.action_taken)}</span></td>
                                     <td>${item.matched_keywords.map(escapeHtml).join(", ") || "-"}<br><span style="color:var(--muted);">${escapeHtml(item.decision_reason || item.evidence_summary || "설명 없음")}</span></td>
                                 </tr>
@@ -1942,7 +1984,7 @@
 
             container.querySelectorAll(".page-button").forEach(button => {
                 button.addEventListener("click", () => {
-                    loadLogs(Number(button.dataset.page));
+                    requestLogs(Number(button.dataset.page));
                 });
             });
 
@@ -1960,6 +2002,7 @@
         function buildLogQuery(page = currentLogPage, limit = LOGS_PER_PAGE) {
             const params = new URLSearchParams();
             const action = document.getElementById("actionFilter").value;
+            const analysisStatus = document.getElementById("analysisStatusFilter").value;
             const channel = document.getElementById("channelFilter").value;
             const department = document.getElementById("departmentFilter").value;
             const userId = document.getElementById("userFilter").value;
@@ -1968,6 +2011,7 @@
             const keyword = document.getElementById("searchInput").value.trim();
 
             if (action) params.set("action", action);
+            if (analysisStatus) params.set("analysis_status", analysisStatus);
             if (channel) params.set("leak_channel", channel);
             if (department) params.set("department", department);
             if (userId) params.set("user_id", userId);
@@ -2031,22 +2075,37 @@
         }
 
         async function loadLogs(page = 1) {
+            const generation = ++logListRequestGeneration;
             currentLogPage = Math.max(1, Number(page) || 1);
             selectedLogId = null;
             currentLogDetail = null;
             renderLogDetail(null);
             renderHighRiskEvents(currentHighRiskItems);
-            const response = await fetch(buildLogQuery(currentLogPage), { cache: "no-store" });
-            if (!response.ok) throw new Error(`Log list request failed: ${response.status}`);
-            const logs = await response.json();
-            const total = Number(logs.total);
-            if (!Number.isInteger(total) || total < 0 || !Array.isArray(logs.items)) {
-                throw new Error("Log list response has invalid pagination fields.");
+            try {
+                const response = await fetch(buildLogQuery(currentLogPage), { cache: "no-store" });
+                if (!response.ok) throw new Error(`Log list request failed: ${response.status}`);
+                const logs = await response.json();
+                if (generation !== logListRequestGeneration) return;
+                const total = Number(logs.total);
+                if (!Number.isInteger(total) || total < 0 || !Array.isArray(logs.items)) {
+                    throw new Error("Log list response has invalid pagination fields.");
+                }
+                const totalPages = Math.max(1, Math.ceil(total / LOGS_PER_PAGE));
+                if (currentLogPage > totalPages) return loadLogs(totalPages);
+                renderLogs(logs.items, total);
+                renderRecentLogs(logs.items);
+            } catch (error) {
+                if (generation === logListRequestGeneration) {
+                    setText("logMeta", "로그 정보를 불러오지 못했습니다.");
+                    document.getElementById("logTableWrap").innerHTML =
+                        '<div class="empty" role="alert">API 연결에 실패했습니다. 잠시 후 다시 시도해주세요.</div>';
+                }
+                throw error;
             }
-            const totalPages = Math.max(1, Math.ceil(total / LOGS_PER_PAGE));
-            if (currentLogPage > totalPages) return loadLogs(totalPages);
-            renderLogs(logs.items, total);
-            renderRecentLogs(logs.items);
+        }
+
+        function requestLogs(page = 1) {
+            loadLogs(page).catch(error => console.error(error));
         }
 
         async function loadDashboard() {
@@ -2084,16 +2143,17 @@
             }
         }
 
-        document.getElementById("refreshLogsButton").addEventListener("click", () => loadLogs(1));
-        document.getElementById("actionFilter").addEventListener("change", () => loadLogs(1));
-        document.getElementById("channelFilter").addEventListener("change", () => loadLogs(1));
-        document.getElementById("departmentFilter").addEventListener("change", () => loadLogs(1));
-        document.getElementById("userFilter").addEventListener("change", () => loadLogs(1));
-        document.getElementById("startDateFilter").addEventListener("change", () => loadLogs(1));
-        document.getElementById("endDateFilter").addEventListener("change", () => loadLogs(1));
+        document.getElementById("refreshLogsButton").addEventListener("click", () => requestLogs(1));
+        document.getElementById("actionFilter").addEventListener("change", () => requestLogs(1));
+        document.getElementById("analysisStatusFilter").addEventListener("change", () => requestLogs(1));
+        document.getElementById("channelFilter").addEventListener("change", () => requestLogs(1));
+        document.getElementById("departmentFilter").addEventListener("change", () => requestLogs(1));
+        document.getElementById("userFilter").addEventListener("change", () => requestLogs(1));
+        document.getElementById("startDateFilter").addEventListener("change", () => requestLogs(1));
+        document.getElementById("endDateFilter").addEventListener("change", () => requestLogs(1));
         document.getElementById("searchInput").addEventListener("input", () => {
             clearTimeout(window.logSearchTimer);
-            window.logSearchTimer = setTimeout(() => loadLogs(1), 250);
+            window.logSearchTimer = setTimeout(() => requestLogs(1), 250);
         });
         document.getElementById("realtimeRiskClose").addEventListener("click", hideRealtimeRiskAlert);
         document.getElementById("realtimeRiskDismiss").addEventListener("click", hideRealtimeRiskAlert);

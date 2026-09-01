@@ -11,7 +11,12 @@ def test_all_scenarios_are_sent_in_presentation_order(
     sent_payloads = []
     intervals = []
 
-    def fake_post_json(api_url: str, payload: dict, token: str | None = None) -> dict:
+    def fake_post_json(
+        api_url: str,
+        payload: dict,
+        token: str | None = None,
+        agent_id: str | None = None,
+    ) -> dict:
         sent_payloads.append(payload)
         return {"event_id": payload["event_id"], "duplicate": False}
 
@@ -28,6 +33,8 @@ def test_all_scenarios_are_sent_in_presentation_order(
             "presentation-test",
             "--interval",
             "0.25",
+            "--token",
+            "test-agent-token",
         ],
     )
 

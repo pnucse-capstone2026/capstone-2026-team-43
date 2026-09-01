@@ -39,7 +39,8 @@ def make_log_payload(
     file_path: str = r"C:\Users\finance_user\Documents\q3_revenue_forecast.xlsx",
     leak_channel: str = "USB_COPY",
     detection_type: str = "HYBRID",
-    ai_score: float = 0.91,
+    analysis_status: str = "SUCCESS",
+    ai_score: float | None = 0.91,
     model_version: str | None = "koelectra-dlp-v7",
     action_taken: str = "BLOCKED",
 ) -> dict:
@@ -56,6 +57,7 @@ def make_log_payload(
         "process_name": "explorer.exe",
         "leak_channel": leak_channel,
         "detection_type": detection_type,
+        "analysis_status": analysis_status,
         "ai_score": ai_score,
         "model_version": model_version,
         "matched_keywords": ["confidential", "forecast"],
@@ -140,6 +142,9 @@ def test_startup_creates_only_the_temporary_database(
         policy_audit_count = connection.execute(
             "SELECT COUNT(*) FROM dlp_policy_audit"
         ).fetchone()[0]
+        ingest_conflict_count = connection.execute(
+            "SELECT COUNT(*) FROM dlp_ingest_conflicts"
+        ).fetchone()[0]
         database_epoch = connection.execute(
             """
             SELECT metadata_value
@@ -154,15 +159,17 @@ def test_startup_creates_only_the_temporary_database(
         "dlp_metadata",
         "dlp_agent_heartbeats",
         "dlp_policy_audit",
+        "dlp_ingest_conflicts",
     }.issubset(tables)
     assert log_count == 0
     assert policy_count == 2
     assert heartbeat_count == 0
     assert policy_audit_count == 0
+    assert ingest_conflict_count == 0
     assert database_epoch
 
 
-def test_log_schema_migration_adds_model_version_to_existing_database() -> None:
+def test_log_schema_migration_adds_analysis_contract_to_existing_database() -> None:
     connection = sqlite3.connect(":memory:")
     connection.row_factory = sqlite3.Row
     try:
@@ -171,13 +178,49 @@ def test_log_schema_migration_adds_model_version_to_existing_database() -> None:
             CREATE TABLE dlp_logs (
                 log_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 event_id TEXT,
-                timestamp TEXT NOT NULL
+                agent_id TEXT,
+                timestamp TEXT NOT NULL,
+                received_at TEXT,
+                host_ip TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                department TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_path TEXT,
+                process_name TEXT,
+                leak_channel TEXT NOT NULL,
+                detection_type TEXT NOT NULL,
+                ai_score REAL NOT NULL,
+                model_version TEXT,
+                matched_keywords TEXT NOT NULL,
+                policy_id TEXT,
+                action_taken TEXT NOT NULL,
+                decision_reason TEXT,
+                evidence_summary TEXT NOT NULL,
+                latency_ms INTEGER
             )
             """
         )
+        payload = make_log_payload("legacy-event", detection_type="RULE_BASED", model_version=None)
         connection.execute(
-            "INSERT INTO dlp_logs (event_id, timestamp) VALUES (?, ?)",
-            ("legacy-event", "2026-08-13T00:00:00+00:00"),
+            """
+            INSERT INTO dlp_logs (
+                event_id, agent_id, timestamp, host_ip, hostname, user_id,
+                department, file_name, file_path, process_name, leak_channel,
+                detection_type, ai_score, model_version, matched_keywords,
+                policy_id, action_taken, decision_reason, evidence_summary, latency_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload["event_id"], payload["agent_id"], payload["timestamp"],
+                payload["host_ip"], payload["hostname"], payload["user_id"],
+                payload["department"], payload["file_name"], payload["file_path"],
+                payload["process_name"], payload["leak_channel"],
+                payload["detection_type"], payload["ai_score"], payload["model_version"],
+                json.dumps(payload["matched_keywords"]), payload["policy_id"],
+                payload["action_taken"], payload["decision_reason"],
+                payload["evidence_summary"], payload["latency_ms"],
+            ),
         )
 
         main.ensure_log_schema(connection.cursor())
@@ -187,11 +230,12 @@ def test_log_schema_migration_adds_model_version_to_existing_database() -> None:
             row["name"]
             for row in connection.execute("PRAGMA table_info(dlp_logs)").fetchall()
         }
-        assert "model_version" in columns
+        assert {"model_version", "analysis_status", "payload_hash"} <= columns
         legacy_row = connection.execute(
-            "SELECT event_id, model_version FROM dlp_logs"
+            "SELECT event_id, analysis_status, ai_score, payload_hash FROM dlp_logs"
         ).fetchone()
-        assert tuple(legacy_row) == ("legacy-event", None)
+        assert tuple(legacy_row[:3]) == ("legacy-event", "SKIPPED", None)
+        assert len(legacy_row[3]) == 64
     finally:
         connection.close()
 
@@ -242,7 +286,7 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
 
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
-    assert health.json()["analysis_mode"] == "mock"
+    assert health.json()["analysis_mode"] == "disabled"
     assert health.json()["ai_server_url_configured"] is False
     assert health.json()["high_risk_score_threshold"] == main.HIGH_RISK_SCORE_THRESHOLD
     assert health.json()["dashboard_auth_enabled"] is False
@@ -355,6 +399,9 @@ def test_dashboard_auth_protects_pages_and_all_read_apis(
     protected_paths = (
         "/dashboard",
         "/logs",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
         "/api/v1/logs",
         "/api/v1/alerts",
         "/api/v1/logs/filter-options",
@@ -378,6 +425,37 @@ def test_dashboard_auth_protects_pages_and_all_read_apis(
     assert VIEWER_CREDENTIALS[1] not in health.text
     assert ADMIN_CREDENTIALS[0] not in health.text
     assert ADMIN_CREDENTIALS[1] not in health.text
+
+
+def test_dashboard_basic_auth_rejects_plain_http(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enable_dashboard_auth(monkeypatch)
+
+    response = client.get(
+        "http://testserver/dashboard",
+        auth=VIEWER_CREDENTIALS,
+    )
+
+    assert response.status_code == 426
+    assert response.headers["upgrade"] == "TLS/1.2"
+
+
+def test_non_loopback_startup_requires_auth_and_https(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "AGENT_API_TOKEN", "a" * 32)
+    monkeypatch.setattr(main, "AGENT_API_TOKENS", {})
+    monkeypatch.setattr(main, "DASHBOARD_AUTH_ENABLED", False)
+    with pytest.raises(RuntimeError, match="authentication"):
+        main.validate_server_security("0.0.0.0", None, None)
+
+    monkeypatch.setattr(main, "DASHBOARD_AUTH_ENABLED", True)
+    with pytest.raises(RuntimeError, match="HTTPS"):
+        main.validate_server_security("192.168.0.20", None, None)
+
+    main.validate_server_security("192.168.0.20", "cert.pem", "key.pem")
 
 
 def test_dashboard_basic_credentials_do_not_replace_agent_token(
@@ -413,7 +491,7 @@ def test_dashboard_basic_credentials_do_not_replace_agent_token(
         "/api/v1/analyze",
         headers=agent_headers,
         json=make_analyze_payload("agent-token-still-analyzes"),
-    ).status_code == 200
+    ).status_code == 503
     assert client.post(
         "/api/v1/logs",
         headers=agent_headers,
@@ -651,9 +729,9 @@ def test_frontend_uses_server_side_log_pagination(client: TestClient) -> None:
         'params.set("limit", String(limit))',
         'params.set("offset", String((page - 1) * limit))',
         "const total = Number(logs.total)",
-        "loadLogs(Number(button.dataset.page))",
+        "requestLogs(Number(button.dataset.page))",
         "${currentLogPage} / ${totalPages} 페이지",
-        "setTimeout(() => loadLogs(1), 250)",
+        "setTimeout(() => requestLogs(1), 250)",
         "async function findLogPage(logId)",
         "const targetPage = await findLogPage(targetLogId)",
         "return Math.floor(position / LOGS_PER_PAGE) + 1",
@@ -830,6 +908,30 @@ def test_configured_tokens_must_be_long_ascii_values(token: str) -> None:
     assert main.require_ascii_token("TEST_TOKEN", "a" * 32) is None
 
 
+def test_per_agent_token_is_bound_to_payload_identity(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = "agent-one-secret-token-32-characters"
+    monkeypatch.setattr(main, "AGENT_API_TOKEN", "")
+    monkeypatch.setattr(main, "AGENT_API_TOKENS", {"agent-one": token})
+    headers = {"X-Agent-Token": token, "X-Agent-ID": "agent-one"}
+
+    accepted = client.post(
+        "/api/v1/logs",
+        headers=headers,
+        json=make_log_payload("per-agent-ok", agent_id="agent-one"),
+    )
+    rejected = client.post(
+        "/api/v1/logs",
+        headers=headers,
+        json=make_log_payload("per-agent-spoof", agent_id="agent-two"),
+    )
+
+    assert accepted.status_code == 201
+    assert rejected.status_code == 403
+
+
 @pytest.mark.parametrize("raw_value", ["", "nan", "inf", "-0.01", "1.01", "invalid"])
 def test_high_risk_score_threshold_rejects_invalid_settings(raw_value: str) -> None:
     with pytest.raises(RuntimeError, match="finite number between 0 and 1"):
@@ -875,7 +977,7 @@ def test_protected_endpoints_reject_invalid_agent_tokens(
     assert heartbeat_response.json()["detail"] == "Invalid or missing agent token."
 
 
-def test_mock_analysis_returns_a_normalized_decision(
+def test_unconfigured_ai_proxy_is_disabled(
     client: TestClient,
     agent_headers: dict[str, str],
 ) -> None:
@@ -885,17 +987,8 @@ def test_mock_analysis_returns_a_normalized_decision(
         headers=agent_headers,
     )
 
-    assert response.status_code == 200
-    result = response.json()
-    assert result["event_id"] == "analyze-test-001"
-    assert result["decision"] == "block"
-    assert 0.85 <= result["confidence_score"] <= 1.0
-    assert result["model_version"] == main.MOCK_MODEL_VERSION
-    assert result["latency_ms"] >= 1
-    assert "api_key" in result["reason"]
-    assert "api_key" in result["evidence_summary"]
-    assert result["reason"] == result["evidence_summary"]
-    assert_host_response_contract(result, "analyze-test-001")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "AI proxy is not configured."
 
 
 @pytest.mark.parametrize("channel", ["smtp", "web_mail", "file_guard"])
@@ -905,18 +998,10 @@ def test_host_agent_channels_are_accepted_with_reason(
     channel: str,
 ) -> None:
     event_id = f"host-channel-{channel}"
-    response = client.post(
-        "/api/v1/analyze",
-        json=make_analyze_payload(event_id, channel=channel),
-        headers=agent_headers,
+    payload = main.AnalyzeRequest.model_validate(
+        make_analyze_payload(event_id, channel=channel)
     )
-
-    assert response.status_code == 200
-    result = response.json()
-    assert result["reason"]
-    assert result["evidence_summary"] == result["reason"]
-    assert f"channel:{channel}" in result["reason"]
-    assert_host_response_contract(result, event_id)
+    assert payload.channel == channel
 
 
 def test_log_create_detail_and_database_persistence(
@@ -977,6 +1062,33 @@ def test_log_model_version_is_optional(
     assert detail.json()["model_version"] is None
 
 
+@pytest.mark.parametrize(
+    ("analysis_status", "ai_score"),
+    [
+        ("SUCCESS", None),
+        ("FAILED", 0.0),
+        ("SKIPPED", 0.4),
+    ],
+)
+def test_log_rejects_inconsistent_analysis_status_and_score(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    analysis_status: str,
+    ai_score: float | None,
+) -> None:
+    response = client.post(
+        "/api/v1/logs",
+        headers=agent_headers,
+        json=make_log_payload(
+            f"invalid-analysis-{analysis_status}",
+            analysis_status=analysis_status,
+            ai_score=ai_score,
+        ),
+    )
+
+    assert response.status_code == 422
+
+
 def test_duplicate_event_id_is_idempotent(
     client: TestClient,
     agent_headers: dict[str, str],
@@ -1000,6 +1112,34 @@ def test_duplicate_event_id_is_idempotent(
         ).fetchone()[0]
 
     assert count == 1
+
+
+def test_duplicate_event_id_with_different_payload_returns_409_and_is_audited(
+    client: TestClient,
+    agent_headers: dict[str, str],
+    temp_db_path: Path,
+) -> None:
+    original = make_log_payload("duplicate-conflict-001")
+    changed = {**original, "file_name": "different-file.txt"}
+
+    assert client.post(
+        "/api/v1/logs", json=original, headers=agent_headers
+    ).status_code == 201
+    conflict = client.post(
+        "/api/v1/logs", json=changed, headers=agent_headers
+    )
+
+    assert conflict.status_code == 409
+    assert "different payload" in conflict.json()["detail"]
+    audit = client.get("/api/v1/ingest-conflicts", headers=agent_headers)
+    assert audit.status_code == 200
+    assert audit.json()["total"] == 1
+    assert audit.json()["items"][0]["event_id"] == original["event_id"]
+    with sqlite3.connect(temp_db_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM dlp_logs WHERE event_id = ?",
+            (original["event_id"],),
+        ).fetchone()[0] == 1
 
 
 def test_realtime_alerts_use_a_cursor_without_replaying_history(
@@ -1488,6 +1628,10 @@ def test_dashboard_summary_uses_only_the_requested_recent_period(
         "warned_count": 1,
         "allowed_count": 1,
         "average_score": 0.6,
+        "successful_analysis_count": 3,
+        "failed_analysis_count": 0,
+        "skipped_analysis_count": 0,
+        "analysis_failure_rate": 0.0,
     }
     assert sum(item["count"] for item in summary["timeline"]) == 3
     assert len(summary["timeline"]) == 7
@@ -1500,6 +1644,49 @@ def test_dashboard_summary_uses_only_the_requested_recent_period(
     assert [item["event_id"] for item in summary["high_risk_events"]] == [
         "summary-blocked"
     ]
+
+
+def test_dashboard_summary_excludes_failed_and_skipped_scores_from_average(
+    client: TestClient,
+    agent_headers: dict[str, str],
+) -> None:
+    post_log(
+        client,
+        agent_headers,
+        make_log_payload("analysis-success", ai_score=0.8),
+    )
+    post_log(
+        client,
+        agent_headers,
+        make_log_payload(
+            "analysis-failed",
+            analysis_status="FAILED",
+            ai_score=None,
+            detection_type="RULE_BASED",
+            model_version="unavailable",
+            action_taken="ALLOWED",
+        ),
+    )
+    post_log(
+        client,
+        agent_headers,
+        make_log_payload(
+            "analysis-skipped",
+            analysis_status="SKIPPED",
+            ai_score=None,
+            detection_type="RULE_BASED",
+            model_version=None,
+            action_taken="ALLOWED",
+        ),
+    )
+
+    kpis = client.get("/api/v1/dashboard/summary").json()["kpis"]
+
+    assert kpis["average_score"] == 0.8
+    assert kpis["successful_analysis_count"] == 1
+    assert kpis["failed_analysis_count"] == 1
+    assert kpis["skipped_analysis_count"] == 1
+    assert kpis["analysis_failure_rate"] == 0.5
 
 
 def test_dashboard_summary_includes_the_first_day_from_midnight(
@@ -1888,9 +2075,9 @@ def test_external_ai_response_is_forwarded_and_normalized(
             {
                 "event_id": event_id,
                 "decision": "REVIEW",
-                "score": 73,
-                "model_version": "team-ai-v1",
-                "latency_ms": "125",
+            "confidence_score": 0.73,
+            "model_version": "team-ai-v1",
+            "latency_ms": 125,
                 "reason": "External model detected sensitive context.",
             }
         )
@@ -2023,6 +2210,18 @@ def test_external_ai_identity_contract_violations_return_502(
         },
         {
             "event_id": "analyze-test-001",
+            "decision": "allow",
+            "confidence_score": 1.0001,
+            "model_version": "team-ai-v1",
+        },
+        {
+            "event_id": "analyze-test-001",
+            "decision": "allow",
+            "score": 73,
+            "model_version": "team-ai-v1",
+        },
+        {
+            "event_id": "analyze-test-001",
             "decision": "block",
             "confidence_score": "not-a-number",
             "model_version": "team-ai-v1",
@@ -2129,7 +2328,10 @@ def test_external_ai_rejects_unbounded_or_invalid_response_bodies(
     assert detail in response.json()["detail"]
 
 
-def test_non_ascii_agent_token_is_rejected_as_unauthorized() -> None:
+def test_non_ascii_agent_token_is_rejected_as_unauthorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main, "AGENT_API_TOKEN", "a" * 32)
     with pytest.raises(main.HTTPException) as error:
         main.verify_agent_token("가" * 32)
 

@@ -135,7 +135,11 @@ def test_seeded_data_populates_dashboard_summary(
         "blocked_count": 6,
         "warned_count": 3,
         "allowed_count": 3,
-        "average_score": 0.72,
+        "average_score": 0.81,
+        "successful_analysis_count": 9,
+        "failed_analysis_count": 0,
+        "skipped_analysis_count": 3,
+        "analysis_failure_rate": 0.0,
     }
     assert sum(item["count"] for item in summary["timeline"]) == 12
     assert len(summary["channel_breakdown"]) == 5

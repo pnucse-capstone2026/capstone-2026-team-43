@@ -252,6 +252,12 @@ def build_demo_logs(base_date: date | None = None) -> list[dict]:
                 "host_ip": f"192.168.10.{40 + sequence}",
                 "hostname": f"demo-host-{sequence:02d}",
                 **{key: value for key, value in scenario.items() if key != "day_offset"},
+                "analysis_status": (
+                    "SKIPPED" if scenario["detection_type"] == "RULE_BASED" else "SUCCESS"
+                ),
+                "ai_score": (
+                    None if scenario["detection_type"] == "RULE_BASED" else scenario["ai_score"]
+                ),
                 "model_version": (
                     None
                     if scenario["detection_type"] == "RULE_BASED"
@@ -290,10 +296,10 @@ def seed_demo_data(db_path: Path, base_date: date | None = None) -> dict:
                 INSERT OR IGNORE INTO dlp_logs (
                     event_id, agent_id, timestamp, received_at, host_ip, hostname,
                     user_id, department, file_name, file_path, process_name,
-                    leak_channel, detection_type, ai_score, matched_keywords,
-                    model_version, policy_id, action_taken, decision_reason,
-                    evidence_summary, latency_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    leak_channel, detection_type, analysis_status, ai_score,
+                    matched_keywords, model_version, policy_id, action_taken,
+                    decision_reason, evidence_summary, latency_ms, payload_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     log.event_id,
@@ -309,6 +315,7 @@ def seed_demo_data(db_path: Path, base_date: date | None = None) -> dict:
                     log.process_name,
                     log.leak_channel,
                     log.detection_type,
+                    log.analysis_status,
                     log.ai_score,
                     json.dumps(log.matched_keywords, ensure_ascii=False),
                     log.model_version,
@@ -317,6 +324,7 @@ def seed_demo_data(db_path: Path, base_date: date | None = None) -> dict:
                     log.decision_reason,
                     log.evidence_summary,
                     log.latency_ms,
+                    backend_main.log_payload_hash(log),
                 ),
             )
             inserted += cursor.rowcount
@@ -324,19 +332,27 @@ def seed_demo_data(db_path: Path, base_date: date | None = None) -> dict:
                 update_cursor = connection.execute(
                     """
                     UPDATE dlp_logs
-                    SET model_version = ?, decision_reason = ?, evidence_summary = ?
+                    SET analysis_status = ?, ai_score = ?, model_version = ?,
+                        decision_reason = ?, evidence_summary = ?, payload_hash = ?
                     WHERE event_id = ?
                       AND (
-                        model_version IS NOT ?
+                        analysis_status IS NOT ?
+                        OR ai_score IS NOT ?
+                        OR model_version IS NOT ?
                         OR decision_reason IS NOT ?
                         OR evidence_summary IS NOT ?
                       )
                     """,
                     (
+                        log.analysis_status,
+                        log.ai_score,
                         log.model_version,
                         log.decision_reason,
                         log.evidence_summary,
+                        backend_main.log_payload_hash(log),
                         log.event_id,
+                        log.analysis_status,
+                        log.ai_score,
                         log.model_version,
                         log.decision_reason,
                         log.evidence_summary,

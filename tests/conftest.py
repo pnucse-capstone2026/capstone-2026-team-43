@@ -21,12 +21,14 @@ def temp_db_path(tmp_path: Path) -> Path:
 def client(temp_db_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     monkeypatch.setattr(main, "DB_PATH", temp_db_path)
     monkeypatch.setattr(main, "AGENT_API_TOKEN", TEST_AGENT_TOKEN)
+    monkeypatch.setattr(main, "AGENT_API_TOKENS", {})
     monkeypatch.setattr(main, "AI_SERVER_URL", "")
     monkeypatch.setattr(main, "AI_SERVER_TOKEN", "")
     monkeypatch.setattr(main, "AI_SERVER_TIMEOUT_SECONDS", 1.0)
     monkeypatch.setattr(main, "DASHBOARD_AUTH_ENABLED", False)
+    monkeypatch.setattr(main.app.state, "security_validated", True)
 
-    with TestClient(main.app) as test_client:
+    with TestClient(main.app, base_url="https://testserver") as test_client:
         yield test_client
 
 

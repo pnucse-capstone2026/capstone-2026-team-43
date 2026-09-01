@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_API_URL = "http://127.0.0.1:8000/api/v1/logs"
 DEFAULT_ANALYZE_URL = "http://127.0.0.1:8000/api/v1/analyze"
-DEFAULT_AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "sentry-agent-demo-token")
+DEFAULT_AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "")
 FIXTURE_MODEL_VERSION = "demo-fixture-not-live"
 ANALYZED_FIXTURE_MARKER = "[WEB FIXTURE - NOT HOST LIVE]"
 DECISION_TO_ACTION = {
@@ -204,6 +204,14 @@ def build_sample_payload(
         "host_ip": "192.168.10.42",
         "hostname": "host-agent-demo-01",
         **scenario_payload,
+        "analysis_status": (
+            "SKIPPED" if scenario_payload["detection_type"] == "RULE_BASED" else "SUCCESS"
+        ),
+        "ai_score": (
+            None
+            if scenario_payload["detection_type"] == "RULE_BASED"
+            else scenario_payload["ai_score"]
+        ),
         "model_version": FIXTURE_MODEL_VERSION,
         "decision_reason": (
             f"[DEMO FIXTURE - NOT LIVE] {scenario_payload['decision_reason']}"
@@ -234,6 +242,7 @@ def build_analyze_payload(scenario: str, log_payload: dict) -> dict:
 def apply_analysis_result(log_payload: dict, analysis_result: dict) -> dict:
     decision = analysis_result["decision"]
     log_payload["ai_score"] = analysis_result["confidence_score"]
+    log_payload["analysis_status"] = "SUCCESS"
     log_payload["action_taken"] = DECISION_TO_ACTION[decision]
     log_payload["detection_type"] = "HYBRID"
     log_payload["latency_ms"] = analysis_result["latency_ms"]
@@ -252,11 +261,18 @@ def expand_scenarios(scenario: str, count: int) -> list[str]:
     return list(SCENARIO_ORDER) * count if scenario == "all" else [scenario] * count
 
 
-def post_json(api_url: str, payload: dict, token: str | None = None) -> dict:
+def post_json(
+    api_url: str,
+    payload: dict,
+    token: str | None = None,
+    agent_id: str | None = None,
+) -> dict:
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if token:
         headers["X-Agent-Token"] = token
+    if agent_id:
+        headers["X-Agent-ID"] = agent_id
 
     request = Request(
         api_url,
@@ -318,7 +334,7 @@ def main() -> int:
     parser.add_argument(
         "--token",
         default=DEFAULT_AGENT_API_TOKEN,
-        help="X-Agent-Token header value. Default: AGENT_API_TOKEN or local demo token.",
+        help="X-Agent-Token header value. Default: AGENT_API_TOKEN.",
     )
     parser.add_argument(
         "--analyze-first",
@@ -336,6 +352,8 @@ def main() -> int:
         parser.error("--count must be greater than or equal to 1.")
     if args.interval < 0:
         parser.error("--interval must be greater than or equal to 0.")
+    if not args.dry_run and not args.token:
+        parser.error("--token or AGENT_API_TOKEN is required when sending requests.")
 
     if args.analyze_url == DEFAULT_ANALYZE_URL and args.url != DEFAULT_API_URL:
         args.analyze_url = args.url.removesuffix("/logs") + "/analyze"
@@ -373,7 +391,12 @@ def main() -> int:
         if args.analyze_first:
             analyze_payload = build_analyze_payload(scenario, payload)
             try:
-                analysis_result = post_json(args.analyze_url, analyze_payload, token=args.token)
+                analysis_result = post_json(
+                    args.analyze_url,
+                    analyze_payload,
+                    token=args.token,
+                    agent_id=args.agent_id,
+                )
             except HTTPError as error:
                 print(
                     f"Analyze request {index} failed with HTTP {error.code}: "
@@ -391,7 +414,12 @@ def main() -> int:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
 
         try:
-            result = post_json(args.url, payload, token=args.token)
+            result = post_json(
+                args.url,
+                payload,
+                token=args.token,
+                agent_id=args.agent_id,
+            )
         except HTTPError as error:
             print(f"Request {index} failed with HTTP {error.code}: {error.read().decode('utf-8')}")
             return 1

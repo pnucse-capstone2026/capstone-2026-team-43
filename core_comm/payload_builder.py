@@ -165,6 +165,7 @@ class AnalysisResult:
     model_version: str = ""
     latency_ms: float = 0.0
     bench: BenchTimings = field(default_factory=BenchTimings)
+    analysis_failed: bool = False
 
     @property
     def risk_score(self) -> float:

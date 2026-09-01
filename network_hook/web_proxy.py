@@ -408,6 +408,7 @@ class _DLPAddon:
             "reason":         result.reason,
             "latency_ms":     int(result.latency_ms),
             "detection_type": "RULE_BASED" if getattr(self._api, "is_mock", True) else "HYBRID",
+            "analysis_failed": result.analysis_failed,
             "bench":          result.bench.to_dict(),
         }
 

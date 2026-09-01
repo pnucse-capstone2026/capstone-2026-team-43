@@ -139,6 +139,7 @@ class ApiClient:
                 confidence_score=1.0,
                 action="block",
                 reason="AI 서버 타임아웃 — 보수적 차단",
+                analysis_failed=True,
             )
         except Exception as exc:
             logger.error("AI 서버 오류: %s — block 처리", exc)
@@ -147,4 +148,5 @@ class ApiClient:
                 confidence_score=1.0,
                 action="block",
                 reason=f"AI 서버 오류: {exc}",
+                analysis_failed=True,
             )

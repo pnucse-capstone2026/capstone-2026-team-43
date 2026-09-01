@@ -104,7 +104,7 @@ def build_event_logger(settings: dict[str, Any]) -> EventLogger:
     return EventLogger(
         store=store,
         dashboard_url=dashboard_url,
-        dashboard_token=server_cfg.get("dashboard_token", ""),
+        dashboard_token=os.environ.get("AGENT_API_TOKEN") or server_cfg.get("dashboard_token", ""),
         timeout=server_cfg.get("request_timeout_sec", 10),
         send_immediately=send_now,
         agent_id=agent_cfg.get("agent_id", ""),
@@ -152,6 +152,7 @@ def make_block_handler(
             "reason":          result.reason,
             "latency_ms":      int(result.latency_ms),
             "detection_type":  "RULE_BASED" if api_client.is_mock else "HYBRID",
+            "analysis_failed": result.analysis_failed,
             "bench":           result.bench.to_dict(),
         }
 
@@ -238,6 +239,7 @@ def build_clipboard_hook(
                 "reason":         result.reason,
                 "latency_ms":     int(result.latency_ms),
                 "detection_type": "RULE_BASED" if api_client.is_mock else "HYBRID",
+                "analysis_failed": result.analysis_failed,
                 "bench":          result.bench.to_dict(),
             }
 

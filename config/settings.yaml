@@ -5,8 +5,8 @@ server:
   ai_base_url: "https://circumstances-amendments-aquatic-yes.trycloudflare.com"
   # 웹 대시보드 베이스 URL (uvicorn 기본 포트 8000)
   dashboard_url: "http://127.0.0.1:8000"
-  # 실제 값은 AGENT_API_TOKEN 환경변수에 설정 (X-Agent-Token 헤더)
-  dashboard_token: ""
+  # 웹 대시보드 인증 토큰 (X-Agent-Token 헤더)
+  dashboard_token: "sentry-agent-demo-token"
   request_timeout_sec: 10
 
 agent:

@@ -46,6 +46,10 @@ def _infer_ext_from_ct(content_type: str) -> str:
 
 logger = logging.getLogger(__name__)
 
+# 업로드/멀티파트: 전체 본문 추출·정규식 시 메모리·AI 지연 폭증 방지
+_MAX_UPLOAD_EXTRACT_BYTES = 2 * 1024 * 1024   # FileInspector 입력 상한
+_MAX_INSPECT_TEXT_CHARS   = 2 * 1024 * 1024   # regex·AI 입력 상한
+
 # 차단 시 브라우저에 보여줄 HTML
 _BLOCK_HTML = """\
 <!DOCTYPE html>
@@ -127,8 +131,14 @@ class _DLPAddon:
         if self._is_target(host) or self._is_drive_target(host):
             logger.info("[WebProxy] CONNECT → %s [DLP 대상]", flow.request.pretty_host)
 
-    def request(self, flow) -> None:  # noqa: ANN001
-        """요청이 서버로 전달되기 전 호출. block 결정 시 즉시 응답 설정."""
+    async def request(self, flow) -> None:  # noqa: ANN001
+        """요청이 서버로 전달되기 전 호출. block 결정 시 즉시 응답 설정.
+
+        async로 선언해 이벤트 루프를 블로킹하지 않는다.
+        AI 서버 호출(_handle)은 run_in_executor로 별도 스레드에서 실행 —
+        mitmproxy가 시스템 프록시일 때 requests.post()가 자기 자신으로
+        CONNECT를 보내 이벤트 루프를 데드락시키는 문제를 방지한다.
+        """
         try:
             self._register_upload_init(flow)
 
@@ -155,7 +165,8 @@ class _DLPAddon:
                     url[:200],
                 )
 
-            self._handle(flow)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._handle, flow)
         except Exception:
             logger.exception("[WebProxy] request 처리 중 예외")
 
@@ -365,6 +376,13 @@ class _DLPAddon:
                 )
             return
 
+        if len(text) > _MAX_INSPECT_TEXT_CHARS:
+            logger.info(
+                "[WebProxy] inspect text truncated: %d → %d chars  url=%s",
+                len(text), _MAX_INSPECT_TEXT_CHARS, flow.request.pretty_url[:120],
+            )
+            text = text[:_MAX_INSPECT_TEXT_CHARS]
+
         # ① 정규식 검증 시간 측정
         t_regex0 = _time.perf_counter()
         hits = self._rule_filter.match(text)
@@ -390,6 +408,12 @@ class _DLPAddon:
         host = flow.request.pretty_host.lower()
         process_name = f"browser@{host}"
         payload = self._builder.build(text, hits, channel, process_name)
+        snippet_len = len(payload.text)
+        if snippet_len > 16_000:
+            logger.warning(
+                "[WebProxy] AI snippet large: %d chars  url=%s",
+                snippet_len, flow.request.pretty_url[:120],
+            )
 
         # ②③④ AI 전송·처리·수신 시간 (api_client 내부에서 측정)
         result  = self._api.analyze(payload)
@@ -411,7 +435,7 @@ class _DLPAddon:
             "bench":          result.bench.to_dict(),
         }
 
-        if result.should_block:
+        if result.should_block or result.needs_review:
             # ⑤ 차단 실행 시간 측정 (HTTP 451 응답 + 팝업)
             t_block0 = _time.perf_counter()
 
@@ -452,18 +476,9 @@ class _DLPAddon:
             result.bench.log_summary(channel)
             return
 
-        if result.needs_review:
-            result.bench.log_summary(channel)
-            self._event_logger.log(
-                channel=channel,
-                action="review",
-                process_name=process_name,
-                hits=hits,
-                text=text,
-                extra=_extra,
-            )
-            logger.warning("[WebProxy] review 기록 — %s", flow.request.pretty_url)
         # allow → 그대로 통과
+        result.bench.log_summary(channel)
+        logger.info("[WebProxy] AI allow — 업로드 통과 url=%s", flow.request.pretty_url[:120])
 
     # ── 도메인 매칭 ──────────────────────────────────────────────────────────
 
@@ -693,10 +708,18 @@ class _DLPAddon:
             flow.request.method, filename, len(body), effective_ct,
         )
 
-        # FileInspector로 텍스트 추출
+        # FileInspector로 텍스트 추출 (대용량은 앞부분만 샘플)
+        extract_body = body
+        if len(body) > _MAX_UPLOAD_EXTRACT_BYTES:
+            logger.info(
+                "[WebProxy] upload extract truncated: %d → %d bytes  file=%s",
+                len(body), _MAX_UPLOAD_EXTRACT_BYTES, filename,
+            )
+            extract_body = body[:_MAX_UPLOAD_EXTRACT_BYTES]
+
         if self._fi:
             try:
-                text = self._fi.extract_from_bytes(body, filename)
+                text = self._fi.extract_from_bytes(extract_body, filename)
                 if text and text.strip():
                     return text
             except Exception as exc:

@@ -2,12 +2,12 @@
 
 server:
   # AI 서버 URL. 비워두면 mock 모드로 동작 (severity 기반 즉시 판단)
-  ai_base_url: "https://circumstances-amendments-aquatic-yes.trycloudflare.com"
+  ai_base_url: "https://completely-injured-immunology-broadcasting.trycloudflare.com"
   # 웹 대시보드 베이스 URL (uvicorn 기본 포트 8000)
   dashboard_url: "http://127.0.0.1:8000"
   # 웹 대시보드 인증 토큰 (X-Agent-Token 헤더)
   dashboard_token: "sentry-agent-demo-token"
-  request_timeout_sec: 10
+  request_timeout_sec: 20
 
 agent:
   log_level: "INFO"
@@ -22,7 +22,7 @@ agent:
   department: "Unknown"
 
   # AI 전송 페이로드 설정
-  ai_max_text_chars: 0          # 0 = 무제한
+  ai_max_text_chars: 8000       # AI snippet 상한 (0=무제한, 메일 업로드 시 타임아웃 방지)
   ai_max_matches_per_pattern: 10
   ai_context_chars: 200         # 매치 앞뒤 포함 문자 수
 

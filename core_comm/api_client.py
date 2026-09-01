@@ -115,6 +115,7 @@ class ApiClient:
                 url,
                 json=payload.to_dict(),   # AgentRequest 포맷
                 timeout=self._timeout,
+                proxies={"http": None, "https": None},  # 시스템 프록시(mitmproxy) 우회
             )
             t_roundtrip_ms = (time.perf_counter() - t0) * 1000
             resp.raise_for_status()

@@ -286,7 +286,7 @@ def test_health_and_frontend_routes(client: TestClient) -> None:
 
     assert health.status_code == 200
     assert health.json()["status"] == "ok"
-    assert health.json()["analysis_mode"] == "disabled"
+    assert health.json()["analysis_mode"] == "mock"
     assert health.json()["ai_server_url_configured"] is False
     assert health.json()["high_risk_score_threshold"] == main.HIGH_RISK_SCORE_THRESHOLD
     assert health.json()["dashboard_auth_enabled"] is False
@@ -399,9 +399,6 @@ def test_dashboard_auth_protects_pages_and_all_read_apis(
     protected_paths = (
         "/dashboard",
         "/logs",
-        "/docs",
-        "/redoc",
-        "/openapi.json",
         "/api/v1/logs",
         "/api/v1/alerts",
         "/api/v1/logs/filter-options",
@@ -426,8 +423,12 @@ def test_dashboard_auth_protects_pages_and_all_read_apis(
     assert ADMIN_CREDENTIALS[0] not in health.text
     assert ADMIN_CREDENTIALS[1] not in health.text
 
+    assert client.get("/docs").status_code == 200
+    assert client.get("/redoc").status_code == 200
+    assert client.get("/openapi.json").status_code == 200
 
-def test_dashboard_basic_auth_rejects_plain_http(
+
+def test_dashboard_basic_auth_keeps_existing_plain_http_compatibility(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -438,24 +439,7 @@ def test_dashboard_basic_auth_rejects_plain_http(
         auth=VIEWER_CREDENTIALS,
     )
 
-    assert response.status_code == 426
-    assert response.headers["upgrade"] == "TLS/1.2"
-
-
-def test_non_loopback_startup_requires_auth_and_https(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(main, "AGENT_API_TOKEN", "a" * 32)
-    monkeypatch.setattr(main, "AGENT_API_TOKENS", {})
-    monkeypatch.setattr(main, "DASHBOARD_AUTH_ENABLED", False)
-    with pytest.raises(RuntimeError, match="authentication"):
-        main.validate_server_security("0.0.0.0", None, None)
-
-    monkeypatch.setattr(main, "DASHBOARD_AUTH_ENABLED", True)
-    with pytest.raises(RuntimeError, match="HTTPS"):
-        main.validate_server_security("192.168.0.20", None, None)
-
-    main.validate_server_security("192.168.0.20", "cert.pem", "key.pem")
+    assert response.status_code == 200
 
 
 def test_dashboard_basic_credentials_do_not_replace_agent_token(
@@ -491,7 +475,7 @@ def test_dashboard_basic_credentials_do_not_replace_agent_token(
         "/api/v1/analyze",
         headers=agent_headers,
         json=make_analyze_payload("agent-token-still-analyzes"),
-    ).status_code == 503
+    ).status_code == 200
     assert client.post(
         "/api/v1/logs",
         headers=agent_headers,
@@ -977,7 +961,7 @@ def test_protected_endpoints_reject_invalid_agent_tokens(
     assert heartbeat_response.json()["detail"] == "Invalid or missing agent token."
 
 
-def test_unconfigured_ai_proxy_is_disabled(
+def test_unconfigured_ai_proxy_uses_existing_mock(
     client: TestClient,
     agent_headers: dict[str, str],
 ) -> None:
@@ -987,8 +971,10 @@ def test_unconfigured_ai_proxy_is_disabled(
         headers=agent_headers,
     )
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "AI proxy is not configured."
+    assert response.status_code == 200
+    assert response.json()["event_id"] == "analyze-test-001"
+    assert response.json()["model_version"] == main.MOCK_MODEL_VERSION
+    assert 0.0 <= response.json()["confidence_score"] <= 1.0
 
 
 @pytest.mark.parametrize("channel", ["smtp", "web_mail", "file_guard"])

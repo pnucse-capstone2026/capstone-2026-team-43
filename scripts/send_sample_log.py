@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_API_URL = "http://127.0.0.1:8000/api/v1/logs"
 DEFAULT_ANALYZE_URL = "http://127.0.0.1:8000/api/v1/analyze"
-DEFAULT_AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "")
+DEFAULT_AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN") or "sentry-agent-demo-token"
 FIXTURE_MODEL_VERSION = "demo-fixture-not-live"
 ANALYZED_FIXTURE_MARKER = "[WEB FIXTURE - NOT HOST LIVE]"
 DECISION_TO_ACTION = {
@@ -334,7 +334,7 @@ def main() -> int:
     parser.add_argument(
         "--token",
         default=DEFAULT_AGENT_API_TOKEN,
-        help="X-Agent-Token header value. Default: AGENT_API_TOKEN.",
+        help="X-Agent-Token header value. Default: AGENT_API_TOKEN or local demo token.",
     )
     parser.add_argument(
         "--analyze-first",

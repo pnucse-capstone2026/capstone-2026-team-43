@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import math
 import os
@@ -17,9 +16,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request as URLRequest, urlopen
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -28,10 +26,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "backend" / "dlp_dashboard.db"
 FRONTEND_PATH = BASE_DIR / "frontend" / "index.html"
 NO_STORE_HEADERS = {"Cache-Control": "no-store"}
-AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "").strip()
+DEFAULT_AGENT_API_TOKEN = "sentry-agent-demo-token"
+AGENT_API_TOKEN = os.getenv("AGENT_API_TOKEN", "").strip() or DEFAULT_AGENT_API_TOKEN
 AGENT_API_TOKENS_JSON = os.getenv("AGENT_API_TOKENS_JSON", "").strip()
 AI_SERVER_URL = os.getenv("AI_SERVER_URL", "").strip()
 AI_SERVER_TOKEN = os.getenv("AI_SERVER_TOKEN", "").strip()
+MOCK_MODEL_VERSION = "koelectra-v0.1-mock"
 AI_SERVER_TIMEOUT_SECONDS = float(os.getenv("AI_SERVER_TIMEOUT_SECONDS", "5"))
 DATABASE_EPOCH_KEY = "database_epoch"
 AGENT_HEARTBEAT_TTL_SECONDS = 90
@@ -144,10 +144,10 @@ def validate_dashboard_auth_configuration(
     return True
 
 
-if AGENT_API_TOKEN:
+if AGENT_API_TOKEN and AGENT_API_TOKEN != DEFAULT_AGENT_API_TOKEN:
     require_ascii_token("AGENT_API_TOKEN", AGENT_API_TOKEN)
 AGENT_API_TOKENS = parse_agent_api_tokens(AGENT_API_TOKENS_JSON)
-if AGENT_API_TOKEN and AGENT_API_TOKENS:
+if AGENT_API_TOKEN and AGENT_API_TOKEN != DEFAULT_AGENT_API_TOKEN and AGENT_API_TOKENS:
     raise RuntimeError("Configure AGENT_API_TOKEN or AGENT_API_TOKENS_JSON, not both.")
 if AI_SERVER_URL:
     require_ascii_token("AI_SERVER_TOKEN", AI_SERVER_TOKEN)
@@ -177,9 +177,7 @@ MetadataString = Annotated[str, Field(max_length=500)]
 
 
 @asynccontextmanager
-async def lifespan(dashboard_app: FastAPI):
-    if not getattr(dashboard_app.state, "security_validated", False):
-        raise RuntimeError("Start the dashboard with: python run_dashboard.py")
+async def lifespan(_: FastAPI):
     init_db()
     yield
 
@@ -188,11 +186,7 @@ app = FastAPI(
     version="0.1.0",
     description="Host DLP events collection and dashboard API.",
     lifespan=lifespan,
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None,
 )
-app.state.security_validated = False
 dashboard_basic = HTTPBasic(auto_error=False)
 
 class LogCreate(BaseModel):
@@ -334,15 +328,6 @@ def verify_agent_token(
         raise HTTPException(status_code=401, detail="Invalid or missing agent token.")
 
 
-def require_secure_dashboard_transport(request: Request) -> None:
-    if DASHBOARD_AUTH_ENABLED and request.url.scheme != "https":
-        raise HTTPException(
-            status_code=426,
-            detail="Dashboard Basic authentication requires HTTPS.",
-            headers={"Upgrade": "TLS/1.2"},
-        )
-
-
 def dashboard_role(
     credentials: HTTPBasicCredentials | None,
 ) -> Literal["viewer", "admin"]:
@@ -375,19 +360,16 @@ def dashboard_role(
 
 
 def verify_dashboard_viewer(
-    request: Request,
     credentials: Annotated[
         HTTPBasicCredentials | None,
         Depends(dashboard_basic),
     ],
 ) -> None:
     if DASHBOARD_AUTH_ENABLED:
-        require_secure_dashboard_transport(request)
         dashboard_role(credentials)
 
 
 def verify_policy_admin_access(
-    request: Request,
     credentials: Annotated[
         HTTPBasicCredentials | None,
         Depends(dashboard_basic),
@@ -398,7 +380,6 @@ def verify_policy_admin_access(
     if not DASHBOARD_AUTH_ENABLED:
         verify_agent_token(x_agent_token, x_agent_id)
         return "agent-token"
-    require_secure_dashboard_transport(request)
     if dashboard_role(credentials) != "admin":
         raise HTTPException(
             status_code=403,
@@ -413,6 +394,93 @@ def require_matching_agent_id(authenticated_agent_id: str | None, payload_agent_
             status_code=403,
             detail="Authenticated agent ID does not match the payload.",
         )
+
+
+def normalize_text_items(items: list[str]) -> set[str]:
+    return {item.strip().lower() for item in items if item.strip()}
+
+
+def mock_analyze(payload: AnalyzeRequest) -> dict:
+    started_at = perf_counter()
+    snippet = payload.snippet.lower()
+    matched_patterns = normalize_text_items(payload.matched_patterns)
+    severity_hint = str(payload.metadata.get("severity_hint", "") or "").lower()
+    destination = str(payload.metadata.get("dest", "") or "").lower()
+
+    sensitive_weights = {
+        "rrn": 0.22,
+        "resident_registration_number": 0.22,
+        "api_key": 0.20,
+        "secret": 0.18,
+        "password": 0.18,
+        "source_code": 0.18,
+        "confidential": 0.18,
+        "nda": 0.14,
+        "contract": 0.12,
+        "salary": 0.12,
+        "revenue": 0.12,
+        "forecast": 0.12,
+        "prototype": 0.10,
+        "internal": 0.08,
+        "roadmap": 0.08,
+    }
+    severity_weights = {
+        "critical": 0.30,
+        "high": 0.22,
+        "medium": 0.12,
+        "low": 0.04,
+    }
+
+    score = 0.18
+    evidence: list[str] = []
+
+    for keyword, weight in sensitive_weights.items():
+        if keyword in matched_patterns or keyword in snippet:
+            score += weight
+            evidence.append(keyword)
+
+    if severity_hint in severity_weights:
+        score += severity_weights[severity_hint]
+        evidence.append(f"severity:{severity_hint}")
+
+    if destination in {"external", "outside", "internet", "removable"}:
+        score += 0.10
+        evidence.append(f"dest:{destination}")
+
+    if payload.channel in {
+        "usb",
+        "file_guard",
+        "web_upload",
+        "web_mail",
+        "drive_upload",
+        "email_attachment",
+        "outlook",
+        "smtp",
+        "http",
+    }:
+        score += 0.06
+        evidence.append(f"channel:{payload.channel}")
+
+    confidence_score = round(min(score, 0.99), 2)
+    if confidence_score >= 0.85:
+        decision = "block"
+    elif confidence_score >= 0.60:
+        decision = "review"
+    else:
+        decision = "allow"
+
+    latency_ms = max(1, round((perf_counter() - started_at) * 1000))
+    evidence_summary = ", ".join(dict.fromkeys(evidence[:8])) or "no sensitive signal"
+    reason = f"Mock AI analysis matched: {evidence_summary}."
+    return {
+        "event_id": payload.event_id,
+        "decision": decision,
+        "confidence_score": confidence_score,
+        "model_version": MOCK_MODEL_VERSION,
+        "latency_ms": latency_ms,
+        "reason": reason,
+        "evidence_summary": reason,
+    }
 
 
 def get_external_analyze_url() -> str | None:
@@ -516,7 +584,7 @@ def normalize_external_analyze_response(payload: AnalyzeRequest, raw_response: A
 def call_external_ai_server(payload: AnalyzeRequest) -> dict:
     analyze_url = get_external_analyze_url()
     if analyze_url is None:
-        raise HTTPException(status_code=503, detail="AI proxy is not configured.")
+        return mock_analyze(payload)
 
     started_at = perf_counter()
     body = json.dumps(payload.model_dump()).encode("utf-8")
@@ -933,45 +1001,12 @@ async def read_root() -> dict:
     }
 
 
-@app.get(
-    "/openapi.json",
-    dependencies=[Depends(verify_dashboard_viewer)],
-    include_in_schema=False,
-)
-def protected_openapi() -> JSONResponse:
-    return JSONResponse(app.openapi(), headers=NO_STORE_HEADERS)
-
-
-@app.get(
-    "/docs",
-    dependencies=[Depends(verify_dashboard_viewer)],
-    include_in_schema=False,
-)
-def protected_swagger_docs() -> HTMLResponse:
-    return get_swagger_ui_html(
-        openapi_url="/openapi.json",
-        title=f"{app.title} - Swagger UI",
-    )
-
-
-@app.get(
-    "/redoc",
-    dependencies=[Depends(verify_dashboard_viewer)],
-    include_in_schema=False,
-)
-def protected_redoc() -> HTMLResponse:
-    return get_redoc_html(
-        openapi_url="/openapi.json",
-        title=f"{app.title} - ReDoc",
-    )
-
-
 @app.get("/health")
 def health_check() -> dict:
     health = {
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "analysis_mode": "external" if get_external_analyze_url() else "disabled",
+        "analysis_mode": "external" if get_external_analyze_url() else "mock",
         "ai_server_url_configured": bool(get_external_analyze_url()),
         "high_risk_score_threshold": HIGH_RISK_SCORE_THRESHOLD,
         "dashboard_auth_enabled": DASHBOARD_AUTH_ENABLED,
@@ -1659,39 +1694,3 @@ def dashboard_summary(days: int = Query(default=7, ge=1, le=30)) -> dict:
         ],
         "timeline": timeline,
     }
-
-
-def is_loopback_host(host: str) -> bool:
-    normalized = host.strip().strip("[]").lower()
-    if normalized == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(normalized).is_loopback
-    except ValueError:
-        return False
-
-
-def validate_server_security(
-    host: str,
-    ssl_certfile: str | None,
-    ssl_keyfile: str | None,
-) -> None:
-    if not AGENT_API_TOKEN and not AGENT_API_TOKENS:
-        raise RuntimeError(
-            "Set AGENT_API_TOKEN or AGENT_API_TOKENS_JSON before starting the server."
-        )
-    if AGENT_API_TOKEN:
-        require_ascii_token("AGENT_API_TOKEN", AGENT_API_TOKEN)
-    if bool(ssl_certfile) != bool(ssl_keyfile):
-        raise RuntimeError("Configure both --ssl-certfile and --ssl-keyfile.")
-    if is_loopback_host(host):
-        return
-    if not DASHBOARD_AUTH_ENABLED:
-        raise RuntimeError(
-            "Non-loopback binding requires dashboard viewer/admin authentication."
-        )
-    if not ssl_certfile:
-        raise RuntimeError(
-            "Non-loopback binding requires HTTPS. Configure a certificate and key, "
-            "or bind this app to loopback behind an HTTPS reverse proxy."
-        )

@@ -5,9 +5,9 @@ Host Agent가 전송한 민감정보 반출 탐지 로그를 저장하고, 관�
 현재 구현 범위는 다음과 같습니다.
 
 - payload hash를 포함한 `event_id` 멱등 저장과 충돌 감사
-- 필수 전역 Agent Token 또는 Agent별 분리 토큰 인증
+- 기존 로컬 데모 토큰과 선택적 전역·Agent별 토큰 인증
 - Agent 프로세스 heartbeat 저장과 90초 기준 생존 상태·버전 조회
-- LAN에서 필수인 viewer/admin HTTPS Basic 접근 제어(`/docs` 포함)
+- 선택적으로 활성화할 수 있는 viewer/admin HTTP Basic 접근 제어
 - 탐지 로그 검색, 필터, 목록 및 상세 조회
 - 최근 7일 KPI, 탐지 추이, 채널 분포, 부서별 탐지 건수 시각화
 - 고위험 이벤트와 Evidence 상세 분석
@@ -37,7 +37,6 @@ web/
 ├── scripts/
 │   ├── seed_demo_data.py       # 현재 날짜 기준 대시보드 데모 데이터 생성
 │   └── send_sample_log.py      # Agent 로그 및 AI 분석 흐름 시연 스크립트
-├── run_dashboard.py            # bind 주소·인증·HTTPS를 검증하는 실행 진입점
 ├── tests/
 │   ├── conftest.py             # 임시 DB와 TestClient 공통 fixture
 │   ├── test_api.py             # API·DB·AI 자동화 테스트
@@ -81,9 +80,9 @@ python -m playwright install chromium
 
 | 이름 | 필수 여부 | 기본 동작 | 설명 |
 | --- | --- | --- | --- |
-| `AGENT_API_TOKEN` | 둘 중 하나 필수 | 없음 | 모든 Agent가 공유하는 32자 이상 ASCII 토큰 |
-| `AGENT_API_TOKENS_JSON` | 둘 중 하나 필수 | 없음 | Agent별 토큰 JSON. 예: `{"agent-01":"32자 이상..."}`. 전역 토큰과 동시 사용 불가 |
-| `AI_SERVER_URL` | 선택 | Web AI 중계 비활성 | Web의 `/api/v1/analyze`가 전달할 실제 AI 서버 주소 |
+| `AGENT_API_TOKEN` | 팀 연동 시 필수 | 로컬 데모 토큰 사용 | 모든 Agent가 공유하는 32자 이상 ASCII 토큰 |
+| `AGENT_API_TOKENS_JSON` | 선택 | 미사용 | Agent별 토큰 JSON. 예: `{"agent-01":"32자 이상..."}` |
+| `AI_SERVER_URL` | 선택 | 내부 Mock 분석 | Web의 `/api/v1/analyze`가 전달할 실제 AI 서버 주소 |
 | `AI_SERVER_TOKEN` | 외부 AI 사용 시 필수 | 미사용 | 외부 AI 서버의 `AI_API_TOKEN`과 같은 32자 이상 ASCII Bearer 토큰 |
 | `AI_SERVER_TIMEOUT_SECONDS` | 선택 | `5` | 외부 AI 서버 응답 대기 시간(초) |
 | `HIGH_RISK_SCORE_THRESHOLD` | 선택 | `0.85` | Web 대시보드에서 고위험으로 표시할 AI 점수 임계값. `0.0`~`1.0` |
@@ -102,12 +101,18 @@ cp .env.example .env
 
 ## 5. 서버 실행
 
-### 5.1 로컬 실행
+### 5.1 빠른 로컬 실행
 
-기본 토큰은 없습니다. `.env`에 최소 32자 임의 `AGENT_API_TOKEN`을 설정한 뒤 보안 검증 실행기를 사용합니다. `uvicorn backend.main:app` 직접 실행은 검증을 우회할 수 있으므로 서버 시작 단계에서 거부됩니다.
+환경변수를 설정하지 않으면 내부 Mock AI 분석과 기존 로컬 데모 Agent 토큰을 사용합니다.
 
 ```bash
-python run_dashboard.py --host 127.0.0.1 --port 8000 --env-file .env
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+### 5.2 `.env`를 사용하는 팀 연동 실행
+
+```bash
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --env-file .env
 ```
 
 실행 후 확인 URL은 다음과 같습니다.
@@ -119,35 +124,35 @@ python run_dashboard.py --host 127.0.0.1 --port 8000 --env-file .env
 | Swagger API 문서 | `http://127.0.0.1:8000/docs` |
 | 상태 확인 | `http://127.0.0.1:8000/health` |
 
-`/health`의 `analysis_mode`는 Web AI 중계가 설정되면 `external`, 아니면 `disabled`입니다. Host가 AI Server를 직접 호출하는 기본 통합 경로에는 영향을 주지 않습니다. `database_status` 값이 `ok`인지 확인해 SQLite 준비 상태를 점검할 수 있습니다.
+`/health`의 `analysis_mode`가 `mock`이면 내부 Mock 분석, `external`이면 외부 AI 서버 전달 모드입니다. Host가 AI Server를 직접 호출하는 기본 통합 경로에는 영향을 주지 않습니다. `database_status` 값이 `ok`인지 확인해 SQLite 준비 상태를 점검할 수 있습니다.
 
 ### 5.3 두 컴퓨터 시연
 
-두 컴퓨터가 같은 중앙 Web 서버를 사용해야 합니다. 비-loopback 주소는 대시보드 인증과 HTTPS 인증서·키가 모두 없으면 시작되지 않습니다.
+두 컴퓨터가 같은 중앙 Web 서버를 사용해야 합니다. 서버 PC에서는 기존과 같이 해당 PC의 LAN IP에 바인딩해 실행합니다. 팀 공유 환경에서는 `.env`의 Agent 토큰을 반드시 교체합니다.
 
 ```bash
-python run_dashboard.py --host <SERVER_LAN_IP> --port 8443 --env-file .env \
-  --ssl-certfile cert.pem --ssl-keyfile key.pem
+python -m uvicorn backend.main:app --host <SERVER_LAN_IP> --port 8000 --env-file .env
 ```
 
-대시보드 PC에서는 `https://<SERVER_LAN_IP>:8443/dashboard`를 엽니다. 경고음은 브라우저 자동 재생 정책에 따라 첫 클릭이나 키 입력 뒤 활성화될 수 있습니다. Host Agent의 Git 제외 로컬 설정은 다음 서버를 가리킵니다.
+대시보드 PC에서는 `http://<SERVER_LAN_IP>:8000/dashboard`를 엽니다. 경고음은 브라우저 자동 재생 정책에 따라 첫 클릭이나 키 입력 뒤 활성화될 수 있습니다. Host Agent의 설정은 다음 서버를 가리킵니다.
 
 ```yaml
 server:
-  dashboard_url: "https://<SERVER_LAN_IP>:8443"
+  dashboard_url: "http://<SERVER_LAN_IP>:8000"
   dashboard_token: "<AGENT_API_TOKEN과 동일한 값>"
 
 logging:
   send_immediately: true
 ```
 
-대시보드를 먼저 연 뒤 Host Agent에서 반출 시나리오를 실행하면 새 고위험 이벤트가 약 2초 안에 표시됩니다. TLS를 reverse proxy에서 종료하려면 Web 앱은 loopback에 바인딩하고 proxy만 LAN에 공개합니다.
+대시보드를 먼저 연 뒤 Host Agent에서 반출 시나리오를 실행하면 새 고위험 이벤트가 약 2초 안에 표시됩니다.
 
 ### 5.4 대시보드 HTTP Basic 인증
 
-loopback에서는 대시보드 인증을 생략할 수 있지만 LAN 바인딩에서는 필수입니다. 네 viewer/admin 값을 일부만 설정하거나 안전성 검증에 실패하면 시작이 중단됩니다. 인증이 활성화된 모든 요청은 HTTPS가 아니면 HTTP `426`으로 거부됩니다.
+기본은 기존 실행과의 호환을 위해 인증을 비활성화합니다. 네 viewer/admin 값을 모두 설정하면 인증이 활성화되며, 일부만 설정하거나 값 검증에 실패하면 시작이 중단됩니다.
 
-- viewer와 admin은 `/dashboard`, `/logs`, `/docs`, `/redoc`, `/openapi.json` 및 조회 API를 사용할 수 있습니다.
+- viewer와 admin은 `/dashboard`, `/logs` 및 조회 API를 사용할 수 있습니다.
+- `/docs`, `/redoc`, `/openapi.json`은 기존 동작과 같이 공개됩니다.
 - `POST /api/v1/policies`는 인증 활성 시 admin만 호출할 수 있으며 viewer는 HTTP `403`을 받습니다. 인증 비활성 시에는 기존처럼 `X-Agent-Token`을 사용합니다.
 - `GET /api/v1/policy-audit`도 인증 활성 시 admin만 조회할 수 있으며, 인증 비활성 시에는 `X-Agent-Token`을 사용합니다. 응답에는 실제 토큰이나 비밀번호가 아닌 `dashboard-admin` 또는 `agent-token` actor label만 포함됩니다.
 - `GET /api/v1/ingest-conflicts`도 admin 전용이며 동일 event ID에 다른 payload가 들어온 충돌 기록을 조회합니다.
@@ -155,7 +160,7 @@ loopback에서는 대시보드 인증을 생략할 수 있지만 LAN 바인딩�
 - `GET /api/v1/agents`는 다른 조회 API와 동일하게 인증 활성 시 viewer/admin Basic 자격 증명이 필요하며 `X-Agent-Token`으로 대신할 수 없습니다.
 - `/health`는 공개 상태 확인용으로 유지되며 `dashboard_auth_enabled`만 노출하고 사용자명과 비밀번호는 노출하지 않습니다.
 
-브라우저로 HTTPS `/dashboard`를 열면 HTTP `401` 응답의 Basic 인증 창이 나타납니다. 브라우저가 같은 origin의 `fetch` 요청에 자격 증명을 재사용하므로 JavaScript에 비밀번호를 저장하지 않습니다.
+브라우저로 `/dashboard`를 열면 HTTP `401` 응답의 Basic 인증 창이 나타납니다. 브라우저가 같은 origin의 `fetch` 요청에 자격 증명을 재사용하므로 JavaScript에 비밀번호를 저장하지 않습니다. HTTP Basic은 자격 증명을 암호화하지 않으므로 통제된 LAN 밖에서는 HTTPS reverse proxy 뒤에 배치해야 합니다.
 
 Host 통합 검증기가 저장 후 `GET /api/v1/logs`로 readback할 때도 인증이 활성화되어 있으면 Web 서버와 같은 `DASHBOARD_VIEWER_USERNAME`, `DASHBOARD_VIEWER_PASSWORD`를 HTTP Basic으로 전송해야 합니다. `X-Agent-Token`은 Agent 쓰기 API용이므로 인증이 활성화된 조회 API의 readback 자격 증명을 대신하지 않습니다.
 
@@ -167,7 +172,7 @@ Host 통합 검증기가 저장 후 `GET /api/v1/logs`로 readback할 때도 인
 | `GET` | `/api/v1/agent-check` | `X-Agent-Token` | 로그를 남기지 않고 Host 인증·연결 확인 |
 | `POST` | `/api/v1/agents/heartbeat` | `X-Agent-Token` | Agent 프로세스 생존 시각과 버전 upsert |
 | `GET` | `/api/v1/agents` | HTTP Basic(활성 시) | Agent 프로세스별 online/stale 상태 조회 |
-| `POST` | `/api/v1/analyze` | `X-Agent-Token` | 설정된 외부 AI 서버로 분석 요청 전달. 미설정 시 `503` |
+| `POST` | `/api/v1/analyze` | `X-Agent-Token` | Mock 또는 외부 AI 분석 요청 |
 | `POST` | `/api/v1/logs` | `X-Agent-Token` | Host Agent 탐지 로그 저장 |
 | `GET` | `/api/v1/logs` | HTTP Basic(활성 시) | 로그 검색·필터와 서버 페이지 조회 |
 | `GET` | `/api/v1/logs/filter-options` | HTTP Basic(활성 시) | 부서·사용자·Agent 필터 목록 조회 |
@@ -327,7 +332,7 @@ Host Agent는 `POST /api/v1/logs`로 탐지 결과를 전송합니다. 요청 �
 
 ### 6.5 AI 분석 요청·응답 구조
 
-Host Agent의 기본 경로는 AI Server를 직접 호출합니다. Web의 `POST /api/v1/analyze`는 보조 중계 경로이며 `AI_SERVER_URL`이 설정된 경우에만 동작합니다. 내부 Mock 판정은 운영 경로에서 제거했습니다.
+Host Agent의 기본 경로는 AI Server를 직접 호출합니다. Web의 `POST /api/v1/analyze`는 보조 중계 경로이며 `AI_SERVER_URL`이 비어 있으면 기존 내부 Mock 결과를 반환하고, 설정되어 있으면 외부 AI 서버로 전달합니다. Mock 결과는 `model_version=koelectra-v0.1-mock`으로 실제 모델 결과와 구분합니다.
 
 요청 필드:
 
@@ -499,9 +504,8 @@ SQLite 파일은 `backend/dlp_dashboard.db`에 생성되지만 Git에는 포함�
 | `404` | 존재하지 않는 로그 또는 프론트 파일 조회 |
 | `409` | 같은 `event_id`에 기존 저장 내용과 다른 payload 전송 |
 | `422` | 필수 필드 누락, 허용값 위반 또는 타입 오류 |
-| `426` | Basic 인증이 활성화된 서버에 평문 HTTP로 접근 |
 | `502` | 외부 AI 서버 연결 실패 또는 잘못된 응답 |
-| `503` | Agent 인증이 설정되지 않았거나 Web AI 중계가 비활성화됨 |
+| `503` | Agent 토큰을 명시적으로 비웠고 Agent별 토큰도 설정하지 않음 |
 
 ## 7. 샘플 로그 전송
 
@@ -539,7 +543,7 @@ python scripts/send_sample_log.py --scenario all --interval 2.5
 
 위 7개는 Web의 수집·필터·차트·상세 표시를 확인하는 fixture이며, Host Agent가 7개를 모두 독립적으로 탐지한다는 뜻이 아닙니다. 실제 Host 연동 대상은 `CLIPBOARD`, `USB_COPY`, `EMAIL_ATTACHMENT`, `WEB_UPLOAD`, `CLOUD_DRIVE` 5개입니다. 메신저 붙여넣기는 독립 `MESSENGER` 훅이 아니라 Clipboard 훅으로 검사하고 `CLIPBOARD` 채널로 기록합니다. `PRINT`는 Web 표시용 fixture만 있으며 현재 Host Agent에서 미지원입니다.
 
-`--analyze-first`가 없는 샘플의 AI 점수와 조치는 실제 탐지나 모델 결과가 아닌 미리 정한 fixture입니다. 이 경우 `model_version`은 `demo-fixture-not-live`, 판단 근거는 `DEMO FIXTURE - NOT LIVE`로 표시됩니다. Web 분석 중계에 연결된 AI 결과를 사용하려면 `--analyze-first`를 추가하고 `/health`의 `analysis_mode`가 `external`인지 확인합니다. 이때 실제 모델 응답을 사용하더라도 입력과 채널 발생 자체는 Web fixture이므로 판단 근거에는 `WEB FIXTURE - NOT HOST LIVE`가 유지됩니다. `analysis_mode`가 `disabled`이면 중계 API는 HTTP `503`을 반환합니다. Host Agent가 AI 서버에 직접 연결한 이벤트의 실제 모델 여부는 로그 상세의 `analysis_status`, `model_version`, `detection_type`, 판단 근거를 함께 확인합니다.
+`--analyze-first`가 없는 샘플의 AI 점수와 조치는 실제 탐지나 모델 결과가 아닌 미리 정한 fixture입니다. 이 경우 `model_version`은 `demo-fixture-not-live`, 판단 근거는 `DEMO FIXTURE - NOT LIVE`로 표시됩니다. `--analyze-first`를 추가하면 `analysis_mode=mock`에서는 기존 내부 Mock, `external`에서는 연결된 AI 서버의 결과를 사용합니다. 입력과 채널 발생 자체는 Web fixture이므로 판단 근거에는 `WEB FIXTURE - NOT HOST LIVE`가 유지됩니다. Host Agent가 AI 서버에 직접 연결한 이벤트의 실제 모델 여부는 로그 상세의 `analysis_status`, `model_version`, `detection_type`, 판단 근거를 함께 확인합니다.
 
 모든 신규 이벤트는 KPI, 채널 차트와 최근 로그에 자동 반영됩니다. 경고 토스트와 경고음은 조치가 `BLOCKED`이거나 정상 AI 결과의 점수가 설정한 `HIGH_RISK_SCORE_THRESHOLD` 이상인 고위험 이벤트에만 발생합니다.
 
@@ -655,14 +659,14 @@ python -m pytest
 python -m pytest -q
 ```
 
-현재 자동화 테스트는 API·DB·스크립트 129건과 실제 Chromium E2E 3건, 총 132건으로 다음 항목을 검증합니다.
+현재 자동화 테스트는 API·DB·스크립트 128건과 실제 Chromium E2E 3건, 총 131건으로 다음 항목을 검증합니다.
 
 - 테스트마다 `tmp_path` 아래 독립된 SQLite DB 생성
 - 테이블 생성과 기본 정책 시드
 - 대시보드·로그 화면과 SQLite 준비 상태 헬스체크
 - Agent 토큰 인증 성공·실패
 - Agent heartbeat 인증, strict payload, mode별 upsert, 90초 online/stale 집계와 기존 DB 호환
-- 비-loopback 인증·TLS 설정 fail-fast, HTTPS 전용 Basic, viewer/admin 권한과 문서 API 보호
+- 기존 HTTP 실행 호환성, 선택적 viewer/admin 권한과 공개 문서 API
 - 전역/Agent별 토큰 인증과 Agent ID 일치 검증
 - 로그 저장, 상세 조회와 실제 SQLite 반영
 - 동일 ID·동일 hash의 멱등 재전송과 동일 ID·다른 hash의 409·append-only 감사 기록
@@ -724,12 +728,12 @@ python scripts/send_sample_log.py --scenario all --interval 2.5
 
 같은 `event_id`를 다시 전송하면 서버가 기존 `log_id`를 반환하므로 새 알림이 반복되지 않습니다. 다시 시연하려면 고유한 `event_id`를 사용합니다.
 
-다른 PC에서 실제 수신을 검수할 때는 서버 PC에서 HTTPS LAN 실행 후 Host PC의 `dashboard_url`, Agent 토큰과 CA 신뢰를 설정합니다. Host PC에서 실제 지원 채널을 발생시키고 서버 PC에서 해당 Host의 `agent_id`, `hostname`, `event_id`가 표시되는지 확인합니다. 이 항목은 단일 개발 PC의 브라우저 자동화가 대신할 수 없는 물리 환경 인수 테스트입니다.
+다른 PC에서 실제 수신을 검수할 때는 서버 PC에서 기존 LAN 실행 후 Host PC의 `dashboard_url`과 Agent 토큰을 설정합니다. Host PC에서 실제 지원 채널을 발생시키고 서버 PC에서 해당 Host의 `agent_id`, `hostname`, `event_id`가 표시되는지 확인합니다. 이 항목은 단일 개발 PC의 브라우저 자동화가 대신할 수 없는 물리 환경 인수 테스트입니다.
 
 ## 11. 현재 제한사항
 
 - 실제 Host Agent와 AI 서버의 최종 E2E 통합은 아직 진행 전입니다.
-- viewer/admin HTTPS Basic만 제공하며 세션 기반 로그인과 세분화된 RBAC는 없습니다.
+- 기존 실행 호환성을 위해 인증과 HTTPS를 강제하지 않으며 `/docs`, `/redoc`, `/openapi.json`도 공개됩니다. 외부 공개 전에는 HTTPS reverse proxy와 인증 강제가 필요합니다.
 - 정책 UI는 제거된 상태이며 정책 수정·삭제 API는 없습니다.
 - 정책 감사 기록은 append-only이며 자동 삭제·보관 이관은 구현하지 않았습니다.
 - 데이터 저장소는 SQLite이며 운영 DB 전환은 진행 전입니다.

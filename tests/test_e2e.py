@@ -56,7 +56,6 @@ def live_dashboard(
     monkeypatch.setattr(main, "AGENT_API_TOKENS", {})
     monkeypatch.setattr(main, "DASHBOARD_AUTH_ENABLED", False)
     monkeypatch.setattr(main, "AI_SERVER_URL", "")
-    monkeypatch.setattr(main.app.state, "security_validated", True)
 
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))

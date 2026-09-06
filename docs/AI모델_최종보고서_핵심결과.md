@@ -81,3 +81,5 @@
 | 홀드아웃 최종 검증 | `final_holdout_v1.csv` |
 | 탐지회피 검증 | `evasion_test_v1.csv` |
 | 라이브 서버 배치 테스트 | `batch_test_live_api.py` |
+| BLOCK threshold 도출 (v6, 최초) | threshold_analysis.py, threshold_candidates.csv |
+| BLOCK threshold 재도출 (v7, 최종 채택) | threshold_analysis_v7.py, threshold_candidates_v7.csv |

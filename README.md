@@ -1,15 +1,3 @@
-# Sentry AI 분석 서버 — API 문서
-
-담당: 박동화 (AI 모델 / 판별 서버)
-최종 갱신: 2026-08-13
-모델 버전: `koelectra-dlp-v7`
-
-## 1. 엔드포인트
-
-```
-POST {BASE_URL}/api/v1/analyze
-Content-Type: application/json
-```
 
 주의: `{BASE_URL}`은 Colab 세션마다 바뀝니다. (Cloudflare Tunnel 무료 플랜은 고정 도메인 미지원)
 
@@ -71,7 +59,7 @@ Content-Type: application/json
 | 0.20 ~ 0.41 | review |
 | < 0.20 | allow |
 
-v7(구어체 보강 재학습) 기준 ROC/PR curve 재검증 결과. 격식체 하드케이스 50건 + 신규 구어체 하드케이스 34건 + 정식 Test셋으로 검증. 모델 재학습 시 threshold도 재산정 필요.
+v7(구어체 보강 재학습) 기준 ROC/PR curve 재검증 결과 (분석 스크립트: `threshold_analysis_v7.py`, AUC 0.9949). 격식체 하드케이스 50건 + 신규 구어체 하드케이스 34건 + 정식 Test셋(총 129건)으로 검증. 모델 재학습 시 threshold도 재산정 필요.
 
 ## 5. 에러 응답
 

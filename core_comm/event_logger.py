@@ -21,6 +21,7 @@
 
 import json
 import logging
+import math
 import socket
 import threading
 import uuid
@@ -222,15 +223,26 @@ class EventLogger:
         leak_channel  = _CHANNEL_TO_LEAK.get(channel, "MESSENGER")
         action_taken  = _ACTION_TO_TAKEN.get(action.lower(), "BLOCKED")
 
-        # ai_score: extra에 0-1 스케일 ai_score 또는 0-100 risk_score 사용
-        if "ai_score" in extra:
-            ai_score = float(extra["ai_score"])
-        else:
-            ai_score = float(extra.get("risk_score", 95.0)) / 100.0
-        ai_score = round(max(0.0, min(1.0, ai_score)), 4)
-
         # detection_type: extra에서 명시 또는 추론
         detection_type = extra.get("detection_type", "RULE_BASED")
+        analysis_status = extra.get("analysis_status")
+        if analysis_status not in {"SUCCESS", "FAILED", "SKIPPED"}:
+            if extra.get("analysis_failed"):
+                analysis_status = "FAILED"
+            elif detection_type == "RULE_BASED":
+                analysis_status = "SKIPPED"
+            else:
+                analysis_status = "SUCCESS"
+
+        ai_score = None
+        if analysis_status == "SUCCESS":
+            raw_ai_score = extra.get("ai_score")
+            if isinstance(raw_ai_score, bool) or not isinstance(raw_ai_score, (int, float)):
+                raise ValueError("SUCCESS 이벤트에는 0.0~1.0 ai_score가 필요합니다.")
+            ai_score = float(raw_ai_score)
+            if not math.isfinite(ai_score) or not 0.0 <= ai_score <= 1.0:
+                raise ValueError("ai_score는 0.0~1.0 범위여야 합니다.")
+            ai_score = round(ai_score, 4)
 
         file_name = _resolve_file_name(channel, process_name or "", extra)
 
@@ -259,6 +271,7 @@ class EventLogger:
             "process_name":    (process_name or None),
             "leak_channel":    leak_channel,
             "detection_type":  detection_type,
+            "analysis_status": analysis_status,
             "ai_score":        ai_score,
             "matched_keywords": [h.get("id", "") for h in hits if h.get("id")],
             "policy_id":       None,
@@ -289,6 +302,7 @@ class EventLogger:
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self._token:
             headers["X-Agent-Token"] = self._token
+            headers["X-Agent-ID"] = self._agent_id
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=self._timeout)
             resp.raise_for_status()

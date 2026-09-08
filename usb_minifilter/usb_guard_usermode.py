@@ -32,7 +32,7 @@ import win32file
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SEC   = 2.0    # 드라이브 목록 폴링 주기
-_WRITE_SETTLE_SEC    = 2.0    # 파일 쓰기 완료 대기 시간 (rename 후 flush 포함)
+_WRITE_SETTLE_SEC    = 1.0    # 파일 쓰기 완료 대기 시간 (rename 후 flush 포함)
 _MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024   # 50 MB 초과 파일은 건너뜀
 _MIN_TEXT_LEN        = 20     # 추출 텍스트가 이 미만이면 검사 생략
 
@@ -123,6 +123,10 @@ class UsbGuardUserMode:
         self._watched:    dict[str, threading.Event] = {}  # drive → stop event
         self._lock        = threading.Lock()
         self._poll_thread: Optional[threading.Thread] = None
+        # 동일 파일 중복 검사 방지 — Explorer가 action 1/3/5 를 연속으로 보낼 때 팝업 3개 방지
+        # "현재 검사 중"인 경로만 억제 → 검사 완료 후 다시 복사하면 정상 재검사
+        self._inspecting: set[str] = set()
+        self._inspecting_lock = threading.Lock()
         # 설치 시 기록된 내장 드라이브 목록 — 에이전트 재시작과 무관하게 항상 동일한 기준 사용
         self._internal_drives: set[str] = _load_internal_drives()
 
@@ -258,6 +262,15 @@ class UsbGuardUserMode:
                             if fname.startswith("~") or fname.lower().endswith(".tmp"):
                                 logger.info("[UsbGuard] 임시 파일 건너뜀: %s", fname)
                                 continue
+                            # 동일 파일의 중복 이벤트(action 1→3→5) 억제
+                            # 검사가 끝나면 set에서 제거 → 재복사 시 정상 재검사
+                            with self._inspecting_lock:
+                                if full_path in self._inspecting:
+                                    logger.debug(
+                                        "[UsbGuard] 중복 이벤트 무시 action=%d: %s", action, fname
+                                    )
+                                    continue
+                                self._inspecting.add(full_path)
                             logger.info("[UsbGuard] 변경 감지 action=%d: %s", action, full_path)
                             threading.Thread(
                                 target=self._inspect_file,
@@ -283,6 +296,13 @@ class UsbGuardUserMode:
     # ── DLP 검사 ─────────────────────────────────────────────────────────────
 
     def _inspect_file(self, file_path: str, drive: str) -> None:
+        try:
+            self._inspect_file_inner(file_path, drive)
+        finally:
+            with self._inspecting_lock:
+                self._inspecting.discard(file_path)
+
+    def _inspect_file_inner(self, file_path: str, drive: str) -> None:
         # 쓰기 완료까지 대기
         time.sleep(_WRITE_SETTLE_SEC)
 
@@ -372,11 +392,12 @@ class UsbGuardUserMode:
             hits=hits,
             text=text[:500],
             extra={
-                "event_id":       (payload.request_id if result and payload else None),
-                "ai_score":       (result.confidence_score if result else 1.0),
+                "event_id":       (payload.request_id if payload else None),
+                "ai_score":       (result.confidence_score if result else None),
                 "reason":         (result.reason if result else "USB 민감정보 탐지"),
                 "latency_ms":     (int(result.latency_ms) if result else 0),
                 "detection_type": ("RULE_BASED" if getattr(self._ac, "is_mock", True) else "HYBRID"),
+                "analysis_failed": (result.analysis_failed if result else True),
                 "file_path":      file_path,
                 "file_size":      file_size,
                 "drive":          drive,

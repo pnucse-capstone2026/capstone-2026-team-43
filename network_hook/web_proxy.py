@@ -411,13 +411,15 @@ class _DLPAddon:
             "bench":          result.bench.to_dict(),
         }
 
-        if result.should_block:
+        # block / review 모두 HTTP 451로 차단 (업로드는 통과 시 회수 불가)
+        if result.should_block or result.needs_review:
             # ⑤ 차단 실행 시간 측정 (HTTP 451 응답 + 팝업)
             t_block0 = _time.perf_counter()
+            log_action = "blocked" if result.should_block else "review"
 
             self._event_logger.log(
                 channel=channel,
-                action="blocked",
+                action=log_action,
                 process_name=process_name,
                 hits=hits,
                 text=text,
@@ -450,19 +452,9 @@ class _DLPAddon:
             result.bench.t_block_ms = round((_time.perf_counter() - t_block0) * 1000, 2)
             _extra["bench"] = result.bench.to_dict()
             result.bench.log_summary(channel)
+            if result.needs_review:
+                logger.warning("[WebProxy] review — 업로드 차단 유지 url=%s", flow.request.pretty_url)
             return
-
-        if result.needs_review:
-            result.bench.log_summary(channel)
-            self._event_logger.log(
-                channel=channel,
-                action="review",
-                process_name=process_name,
-                hits=hits,
-                text=text,
-                extra=_extra,
-            )
-            logger.warning("[WebProxy] review 기록 — %s", flow.request.pretty_url)
         # allow → 그대로 통과
 
     # ── 도메인 매칭 ──────────────────────────────────────────────────────────

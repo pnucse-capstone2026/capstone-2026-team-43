@@ -1,0 +1,38 @@
+# Sentry Host Agent — global settings
+
+server:
+  # AI 서버 URL. 비워두면 mock 모드로 동작 (severity 기반 즉시 판단)
+  ai_base_url: ""  # mock 모드 (severity 기반 즉시 판단)
+  # 웹 대시보드 베이스 URL (uvicorn 기본 포트 8000)
+  dashboard_url: "http://127.0.0.1:8000"
+  # 웹 대시보드 인증 토큰 (X-Agent-Token 헤더)
+  dashboard_token: "sentry-agent-demo-token"
+  request_timeout_sec: 20
+
+agent:
+  log_level: "INFO"
+  # 정규식 패턴 파일 경로 (프로젝트 루트 기준)
+  regex_patterns: "config/regex_patterns.json"
+
+  # 에이전트/장치 식별자 — 비워두면 호스트명 자동 사용
+  agent_id: ""
+  # 이벤트 전송 시 user_id — 비워두면 Windows USERNAME 환경변수 사용
+  user_id: ""
+  # 부서 정보 — 대시보드 필수 필드
+  department: "Unknown"
+
+  # AI 전송 페이로드 설정
+  ai_max_text_chars: 8000       # AI snippet 상한 (0=무제한, 메일 업로드 시 타임아웃 방지)
+  ai_max_matches_per_pattern: 10
+  ai_context_chars: 200         # 매치 앞뒤 포함 문자 수
+
+logging:
+  # 로컬 JSONL 이벤트 저장 경로 (프로젝트 루트 기준)
+  log_dir: "logs"
+  # 파일 크기(바이트) 초과 시 날짜별로 로테이션
+  max_bytes: 10485760   # 10 MB
+  # 이벤트에 저장할 텍스트 미리보기 최대 길이 (원문 전체 저장 방지)
+  text_preview_len: 120
+
+  # 웹 대시보드 전송 설정
+  send_immediately: true    # 탐지 즉시 POST /api/v1/logs 로 전송

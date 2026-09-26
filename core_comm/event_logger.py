@@ -226,12 +226,12 @@ class EventLogger:
         # detection_type: extra에서 명시 또는 추론
         detection_type = extra.get("detection_type", "RULE_BASED")
         analysis_status = extra.get("analysis_status")
-        if analysis_status not in {"SUCCESS", "FAILED", "SKIPPED"}:
+        if analysis_status not in {"SUCCESS", "FAILED"}:
             if extra.get("analysis_failed"):
                 analysis_status = "FAILED"
-            elif detection_type == "RULE_BASED":
-                analysis_status = "SKIPPED"
             else:
+                # mock(RULE_BASED) 포함, ai_score가 있으면 SUCCESS로 전송
+                # 대시보드 API가 SKIPPED를 허용하지 않으므로 항상 SUCCESS 사용
                 analysis_status = "SUCCESS"
 
         ai_score = None
@@ -271,7 +271,6 @@ class EventLogger:
             "process_name":    (process_name or None),
             "leak_channel":    leak_channel,
             "detection_type":  detection_type,
-            "analysis_status": analysis_status,
             "ai_score":        ai_score,
             "matched_keywords": [h.get("id", "") for h in hits if h.get("id")],
             "policy_id":       None,

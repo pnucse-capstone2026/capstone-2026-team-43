@@ -25,11 +25,17 @@ def test_dashboard_payload_separates_ai_outcomes(tmp_path):
         logger,
         {"detection_type": "HYBRID", "ai_score": 1.0, "analysis_failed": True},
     )
-    skipped = _payload(logger, {"detection_type": "RULE_BASED", "ai_score": 0.95})
+    mock_result = _payload(logger, {"detection_type": "RULE_BASED", "ai_score": 0.95})
 
-    assert (success["analysis_status"], success["ai_score"]) == ("SUCCESS", 0.42)
-    assert (failed["analysis_status"], failed["ai_score"]) == ("FAILED", None)
-    assert (skipped["analysis_status"], skipped["ai_score"]) == ("SKIPPED", None)
+    # analysis_status는 대시보드 LogCreate 스키마에 없으므로 payload에 포함하지 않음
+    assert "analysis_status" not in success
+    assert success["ai_score"] == 0.42
+
+    # AI 장애 시 ai_score는 None (FAILED → score 무효)
+    assert failed["ai_score"] is None
+
+    # mock 모드도 실제 confidence_score를 전송
+    assert mock_result["ai_score"] == 0.95
 
 
 def test_dashboard_payload_rejects_score_scale_guessing(tmp_path):

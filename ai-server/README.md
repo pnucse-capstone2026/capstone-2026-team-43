@@ -63,7 +63,8 @@ pip install -r requirements.txt
 
 모델 가중치(`koelectra-dlp-v7/final`, 약 400MB+)는 GitHub 용량 제한으로 레포에 포함하지 않습니다.
 
-- 다운로드: **(링크 추가 예정)**
+- 다운로드: [Google Drive `koelectra-dlp-v7/final`](https://drive.google.com/drive/folders/1o48Awf-g_iJ3j3oKHQWRZblHkoUyivIk?usp=sharing)
+  - 폴더 전체를 다운로드하면 zip으로 받아집니다. 압축을 풀어 `config.json`, `model.safetensors`, 토크나이저 파일이 한 폴더 바로 아래에 오도록 두세요.
 - 직접 학습으로 재생성: 아래 4절 참고 (`training/train_koelectra_v7.py`, Colab T4 기준 수 분)
 
 ---
@@ -210,11 +211,16 @@ Swagger UI: `{BASE_URL}/docs`
 
 ## 6. 검증 결과 요약
 
+> **해석 시 주의**: 아래 수치는 개발 과정에서 수행한 **보조 검증** 결과이며 최종 성능 지표가 아닙니다.
+> 평가셋이 수십 건 규모의 LLM 합성 데이터이고, 하드케이스 세트는 threshold 선정에도 사용되었습니다.
+> 모델과 threshold를 고정한 뒤 사전에 잠근 독립 평가 세트로 측정하는 최종 성능 평가는 후속 과제입니다
+> (최종보고서 4.4절 참고).
+
 | 검증 항목 | 규모 | 결과 |
 |---|---|---|
 | 최종 홀드아웃 (학습 미사용) | 60건 | 기밀 Recall 100% (30/30), 비기밀 오탐 0% (0/30) |
-| 구어체 하드케이스 (학습 미사용) | 34건 | 기밀 Recall 100%, 오탐 0% |
-| 격식체 하드케이스 | 50건 | 기밀 Recall 93.3% (28/30) |
+| 구어체 하드케이스 (학습 미사용, threshold 선정에 사용) | 34건 | 기밀 Recall 100%, 오탐 0% |
+| 격식체 하드케이스 (threshold 선정에 사용) | 50건 | 기밀 Recall 93.3% (28/30) |
 | 탐지 회피 (변형 표현) | 37건 | 간격 삽입 Recall 90%, 원본 대비 confidence 하락 0/6쌍 |
 | 라이브 서버 배치 | 233건 | 평균 응답 17~30ms (Colab T4). 정확도 수치는 학습 데이터 중복(80.9%)으로 참고치 |
 

@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 """
+[LEGACY] v6 모델 단계 스크립트. 개발 이력 보존용이며 최종 모델(v7)과는 무관.
+실행 위치: ai-server 루트
+
 threshold_analysis.py
 
 목적: '75.0점 컷라인'의 수학적 근거를 마련하기 위한 ROC / PR 곡선 분석

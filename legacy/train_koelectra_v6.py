@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 """
+[LEGACY] v6 모델 단계 스크립트. 개발 이력 보존용이며 최종 모델(v7)과는 무관.
+실행 위치: ai-server 루트
+
 train_koelectra_v6.py
 
 민감정보 파일 반출 탐지 AI 모델 재학습 스크립트
@@ -35,7 +38,7 @@ from transformers import (
 # ------------------------------------------------------------------
 SEED = 42
 MODEL_NAME = "monologg/koelectra-base-v3-discriminator"  # 기존 사용 모델과 동일하게 맞추세요
-DATA_PATH = "train_dataset_v5.csv"          # Colab 작업 디렉토리에 업로드
+DATA_PATH = "data/train_dataset_v5.csv"          # Colab 작업 디렉토리에 업로드
 OUTPUT_DIR = "./koelectra-dlp-v6"
 MAX_LENGTH = 128
 TEST_SIZE = 0.2

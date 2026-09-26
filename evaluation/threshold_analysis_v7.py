@@ -11,7 +11,7 @@ threshold_analysis_v7.py
 - threshold_analysis_v7.png (ROC curve + PR curve, 후보 threshold 표시)
 - threshold_candidates_v7.csv (여러 기준별 후보 threshold와 성능 비교표)
 
-실행 환경: Colab (train_koelectra_v7.py, eval_v7_full.py와 같은 폴더)
+실행 위치: ai-server 루트 (train_koelectra_v7.py, eval_v7_full.py 실행 후 생성된 CSV 사용)
 
 최종 채택값: BLOCK_THRESHOLD = 0.41, REVIEW_THRESHOLD = 0.20
 근거: Youden's J / F1-optimal / F2-optimal(Recall 가중) 세 기준이 공통으로

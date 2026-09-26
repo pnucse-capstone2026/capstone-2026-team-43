@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 """
+[LEGACY] v6 모델 단계 스크립트. 개발 이력 보존용이며 최종 모델(v7)과는 무관.
+실행 위치: ai-server 루트
+
 eval_hard_cases.py
 
 train_koelectra_v6.py로 재학습한 모델(./koelectra-dlp-v6/final)을
@@ -27,7 +30,7 @@ from sklearn.metrics import (
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 MODEL_DIR = "./koelectra-dlp-v6/final"
-HARD_SET_PATH = "hard_test_set_v1.csv"
+HARD_SET_PATH = "data/hard_test_set_v1.csv"
 MAX_LENGTH = 128
 THRESHOLD = 0.75  # 대시보드에 현재 적용 중인 컷라인 (75.0점)과 동일한 기준
 

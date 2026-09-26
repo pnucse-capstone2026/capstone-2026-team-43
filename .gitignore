@@ -179,3 +179,31 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# ===== Sentry ai-server =====
+# 모델 가중치 (용량 제한, 별도 배포)
+model/
+server/model/
+koelectra-dlp-*/
+*.safetensors
+*.bin
+*.pt
+
+# 서버 요청 로그 (입력 텍스트 일부 포함)
+logs/
+*.jsonl
+
+# 터널 바이너리
+cloudflared*
+*.exe
+
+# 실행 산출물
+test_split_*.csv
+train_split_*.csv
+test_predictions_*.csv
+hard_test_results_*.csv
+eval_v7_full_results.csv
+eval_results_*.json
+threshold_candidates*.csv
+threshold_analysis*.png
+batch_live_test_results.csv

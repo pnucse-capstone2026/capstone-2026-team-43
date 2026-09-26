@@ -9,6 +9,7 @@ train_koelectra_v7.py
 v6와 동일한 파이프라인(80/20 stratified split, KoELECTRA fine-tuning)을 사용한다.
 
 실행 환경: Google Colab (GPU: T4 권장)
+실행 위치: ai-server 루트에서  python training/train_koelectra_v7.py
 사전 설치: !pip install -q transformers datasets scikit-learn accelerate torch
 """
 
@@ -34,7 +35,7 @@ from transformers import (
 # ------------------------------------------------------------------
 SEED = 42
 MODEL_NAME = "monologg/koelectra-base-v3-discriminator"
-DATA_PATH = "train_dataset_v6.csv"          # 구어체 보강판 (223건)
+DATA_PATH = "data/train_dataset_v6.csv"          # 구어체 보강판 (223건)
 OUTPUT_DIR = "./koelectra-dlp-v7"
 MAX_LENGTH = 128
 TEST_SIZE = 0.2
@@ -193,4 +194,4 @@ test_df_out.to_csv("test_predictions_v7.csv", index=False, encoding="utf-8-sig")
 trainer.save_model(f"{OUTPUT_DIR}/final")
 tokenizer.save_pretrained(f"{OUTPUT_DIR}/final")
 print(f"\n[INFO] 모델 저장 완료: {OUTPUT_DIR}/final")
-print("[INFO] 다음 단계: eval_hard_cases.py / threshold_analysis.py / batch_test_live_api.py 재실행 필요")
+print("[INFO] 다음 단계: evaluation/eval_v7_full.py -> evaluation/threshold_analysis_v7.py 순서로 실행")

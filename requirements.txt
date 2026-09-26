@@ -1,0 +1,14 @@
+# 서버 실행
+fastapi
+uvicorn
+pydantic>=2
+torch
+transformers>=4.41   # TrainingArguments(eval_strategy=...) 사용
+# 학습·평가
+datasets
+accelerate
+scikit-learn
+pandas
+numpy
+matplotlib
+requests

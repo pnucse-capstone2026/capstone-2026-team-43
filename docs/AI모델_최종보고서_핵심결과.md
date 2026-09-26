@@ -1,7 +1,7 @@
 # AI 모델 파트 — 최종보고서용 핵심 결과 요약
 
 작성: 박동화 | 최종 갱신: 2026-08-30
-목적: 최종보고서 작성 시 AI 모델 파트에서 바로 인용 가능한 검증 결과 정리
+목적: AI 모델 파트의 개발 과정과 검증 결과 요약
 
 ---
 
@@ -54,7 +54,7 @@
 |---|---|---|
 | ROC 분석 (BLOCK threshold 도출) | 정식 Test셋 + 하드케이스 | AUC 0.995 |
 | v7 재검증 ROC 분석 | Test셋 + 하드케이스(84건) | AUC 0.9949 |
-| 라이브 서버 배치 검증 (233건, 최신 threshold 반영) | 233건 | 기밀 Recall **99.2%**, 비기밀 오탐 **0.0%** |
+| 라이브 서버 배치 검증 (233건, 최신 threshold 반영) | 233건 | 기밀 Recall 99.2%, 비기밀 오탐 0.0% ※ 80.9%가 학습 데이터와 중복된 참고치 (2.5절) |
 | 응답 지연시간 (Colab T4, 233건) | 233건 | 평균 **17~30ms**, 95퍼센타일 18~63ms |
 | **완전 신규 홀드아웃 검증** (학습 미사용) | 60건 | 기밀 Recall **100%**, 오탐 **0%** |
 | 탐지 회피(변형 표현) 검증 | 37건 | 간격삽입 Recall 90%, 원본 대비 confidence 하락 사례 0건 |
@@ -63,23 +63,22 @@
 
 ## 4. 한계점 및 향후 과제 (반드시 보고서에 포함 권장)
 
-이 항목들을 먼저 인정하고 서술하면, 심사 질의응답에서 오히려 유리합니다.
-
 1. **암묵적 추론 케이스의 낮은 탐지율**: 트리거 단어나 감정적 표현 없이 순수 사실관계(인사이동, 미발표 일정 등)만으로 민감도를 추론해야 하는 케이스에서 상대적으로 낮은 탐지율(약 33%)을 보임. 재현성 있게 반복 확인된 패턴으로, 향후 데이터 보강이 필요한 영역.
 2. **합성 데이터 기반 검증의 한계**: 학습 및 검증 데이터 전량이 LLM 기반 합성 데이터로, 실제 기업 문서를 활용한 대규모 독립 검증은 향후 과제로 남음.
 3. **confidence_score 분포의 좁은 폭**: 비기밀은 0.1~0.25, 기밀은 0.4~0.9 구간에 몰려 있어, 세밀한 위험도 차등화보다는 이진적 판별에 가깝게 작동. 캘리브레이션(확신도 보정) 개선 여지 있음.
 
 ---
 
-## 5. 재현 근거 파일 (참고용, 레포 위치)
+## 5. 재현 근거 파일
+
+경로는 `ai-server/` 루트 기준. `*` 표시 파일은 레포에 포함되지 않으며 해당 스크립트 실행 시 생성된다.
 
 | 결과 | 근거 파일 |
 |---|---|
-| BLOCK threshold 도출 | `threshold_analysis.py`, `threshold_candidates.csv` |
-| v7 재학습 | `train_koelectra_v7.py`, `data/train_dataset_v6.csv` |
-| 신규 구어체 검증 | `hard_test_casual_v2.csv`, `eval_v7_full.py` |
-| 홀드아웃 최종 검증 | `final_holdout_v1.csv` |
-| 탐지회피 검증 | `evasion_test_v1.csv` |
-| 라이브 서버 배치 테스트 | `batch_test_live_api.py` |
-| BLOCK threshold 도출 (v6, 최초) | threshold_analysis.py, threshold_candidates.csv |
-| BLOCK threshold 재도출 (v7, 최종 채택) | threshold_analysis_v7.py, threshold_candidates_v7.csv |
+| BLOCK threshold 최초 도출 (v6) | `legacy/threshold_analysis.py` → `threshold_candidates.csv`* |
+| v7 재학습 | `training/train_koelectra_v7.py`, `data/train_dataset_v6.csv` → `test_predictions_v7.csv`* |
+| 격식체·신규 구어체 검증 | `data/hard_test_set_v1.csv`, `data/hard_test_casual_v2.csv`, `evaluation/eval_v7_full.py` → `eval_v7_full_results.csv`* |
+| BLOCK/REVIEW threshold 재도출 (v7, 최종 채택) | `evaluation/threshold_analysis_v7.py` → `threshold_candidates_v7.csv`* |
+| 홀드아웃 최종 검증 | `data/final_holdout_v1.csv` |
+| 탐지회피 검증 | `data/evasion_test_v1.csv` |
+| 라이브 서버 배치 테스트 | `evaluation/batch_test_live_api.py` |

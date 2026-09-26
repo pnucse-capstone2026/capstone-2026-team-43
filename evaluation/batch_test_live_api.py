@@ -1,8 +1,16 @@
-# =====================================================================
-# 배치 테스트 (Colab 셀 붙여넣기용)
-# ※ fastapi 서버를 띄운 셀이 계속 돌아가는 상태에서, 새 셀에 이 코드를 붙여넣어 실행하세요.
-# =====================================================================
-!pip install -q requests
+# -*- coding: utf-8 -*-
+"""
+batch_test_live_api.py
+
+실행 중인 AI 서버(/api/v1/analyze)에 train_dataset_v5 + hard_test_set_v1(중복 제거 233건)을
+실제 HTTP 요청으로 보내 decision 분포와 지연시간을 확인하는 라이브 배치 테스트.
+
+주의: 233건 중 상당수(약 81%)가 v7 학습 데이터와 겹치므로, 이 결과는 일반화 성능이 아니라
+      서버 연동·지연시간 확인용 참고치다. 일반화 성능은 data/final_holdout_v1.csv 기준을 볼 것.
+
+사전 준비: 서버 기동 후 출력된 Cloudflare URL을 BASE_URL에 입력
+실행 위치: ai-server 루트에서  python evaluation/batch_test_live_api.py
+"""
 
 import time
 import uuid
@@ -16,14 +24,13 @@ import requests
 BASE_URL = "https://여기에-현재-cloudflare-URL을-붙여넣으세요.trycloudflare.com"
 ANALYZE_ENDPOINT = f"{BASE_URL}/api/v1/analyze"
 
-# 드라이브 경로에 맞게 필요시 수정하세요
-TRAIN_DATA_PATH = "/content/drive/MyDrive/2026_졸업과제/도메인편향개선2/train_dataset_v5.csv"
-HARD_DATA_PATH = "/content/drive/MyDrive/2026_졸업과제/도메인편향개선2/hard_test_set_v1.csv"
+TRAIN_DATA_PATH = "data/train_dataset_v5.csv"
+HARD_DATA_PATH = "data/hard_test_set_v1.csv"
 
 REQUEST_TIMEOUT_SEC = 10
 RETRY_COUNT = 2
 SLEEP_BETWEEN_REQUESTS_SEC = 0.02
-OUTPUT_CSV = "/content/drive/MyDrive/2026_졸업과제/도메인편향개선2/batch_live_test_results.csv"
+OUTPUT_CSV = "batch_live_test_results.csv"
 
 # =====================================================================
 # 1. 데이터 로드 및 병합

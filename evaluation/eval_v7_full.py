@@ -6,7 +6,7 @@ eval_v7_full.py
 1) hard_test_set_v1.csv    (기존 격식체 하드케이스 50건) -> 퇴보 여부 확인
 2) hard_test_casual_v2.csv (신규 구어체 34건, 학습에 전혀 안 쓴 새 문장) -> 진짜 일반화 확인
 
-실행 환경: Colab (koelectra-dlp-v7/final 이 같은 폴더 기준 상대경로에 있어야 함)
+실행 위치: ai-server 루트 (training 단계에서 생성된 ./koelectra-dlp-v7/final 사용)
 
 ※ 이 스크립트의 BLOCK/REVIEW_THRESHOLD(0.44/0.30)는 threshold_analysis_v7.py로
    재분석하기 이전의 중간값입니다. 최종 채택값(0.41/0.20)의 도출 근거는
@@ -35,8 +35,8 @@ def load_and_tag(path, source):
     df["source"] = source
     return df
 
-df1 = load_and_tag("hard_test_set_v1.csv", "formal_hard_v1")
-df2 = load_and_tag("hard_test_casual_v2.csv", "casual_new_v2")
+df1 = load_and_tag("data/hard_test_set_v1.csv", "formal_hard_v1")
+df2 = load_and_tag("data/hard_test_casual_v2.csv", "casual_new_v2")
 
 combined = pd.concat([df1, df2], ignore_index=True)
 print(f"[INFO] 평가셋: 격식체 하드케이스 {len(df1)}건 + 신규 구어체 {len(df2)}건 = 총 {len(combined)}건")
